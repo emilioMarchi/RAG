@@ -34,7 +34,6 @@ function getVis() {
 const docList      = document.getElementById('doc-list');
 const docCount     = document.getElementById('doc-count');
 const pagination   = document.getElementById('pagination');
-const explorerTree = document.getElementById('explorer-tree');
 const uploadZone   = document.getElementById('upload-zone');
 const uploadQueue  = document.getElementById('upload-queue');
 const btnPickFile  = document.getElementById('btn-pick-file');
@@ -480,7 +479,6 @@ async function updateSemanticRelations() {
 
   if (!showRelations) {
     semanticRelations = [];
-    renderExplorerTree();
     return;
   }
 
@@ -531,9 +529,6 @@ async function updateSemanticRelations() {
 
     semanticRelations = relations;
 
-    // Renderizar la vista estructurada/ordenada en la pestaña correspondiente
-    renderExplorerTree();
-
     if (relations.length > 0) {
       network.stabilize(100);
     }
@@ -567,96 +562,6 @@ window.focusNodeInGraph = function(nodeId) {
     nodeDetail.style.display = 'block';
   }
 };
-
-// Renderizar el explorador jerárquico estructurado
-function renderExplorerTree() {
-  if (!explorerTree) return;
-
-  if (documents.length === 0) {
-    explorerTree.innerHTML = '<div class="empty-state">No hay documentos cargados aún.</div>';
-    return;
-  }
-
-  // Agrupar fragmentos por id de documento
-  const parasByDoc = {};
-  allParagraphs.forEach(p => {
-    if (!parasByDoc[p.document_id]) {
-      parasByDoc[p.document_id] = [];
-    }
-    parasByDoc[p.document_id].push(p);
-  });
-
-  const totalDocs = documents.length;
-
-  explorerTree.innerHTML = documents.map((doc, docIdx) => {
-    const colors = getDocumentColors(docIdx, totalDocs);
-    const paras = parasByDoc[doc.id] || [];
-    
-    // Ordenar fragmentos secuencialmente
-    paras.sort((a, b) => a.paragraph_index - b.paragraph_index);
-
-    const fragsHtml = paras.map((p, idx) => {
-      const fragId = `frag-${p.id}`;
-
-      // 1. Relaciones Secuenciales (Prev y Next)
-      let seqHtml = '';
-      if (idx > 0) {
-        seqHtml += `<span class="badge-relation badge-seq">← Secuencial: F${paras[idx - 1].paragraph_index + 1}</span>`;
-      }
-      if (idx < paras.length - 1) {
-        seqHtml += `<span class="badge-relation badge-seq">Secuencial: F${paras[idx + 1].paragraph_index + 1} →</span>`;
-      }
-
-      // 2. Relaciones Semánticas (buscar conexiones conceptuales en la caché)
-      let semHtml = '';
-      const relations = semanticRelations.filter(r => r.source_id === p.id || r.target_id === p.id);
-      
-      relations.forEach(rel => {
-        const otherId = rel.source_id === p.id ? rel.target_id : rel.source_id;
-        const otherPara = allParagraphs.find(op => op.id === otherId);
-        if (otherPara) {
-          const otherDoc = documents.find(d => d.id === otherPara.document_id);
-          const docName = otherDoc ? (otherDoc.title.length > 15 ? otherDoc.title.slice(0, 15) + '…' : otherDoc.title) : 'Doc';
-          const simPct = Math.round(rel.similarity * 100);
-          const isHigh = rel.similarity > 0.90;
-          
-          semHtml += `
-            <span class="badge-relation badge-semantic${isHigh ? ' high' : ''}" 
-                  onclick="focusNodeInGraph('frag-${otherPara.id}')"
-                  title="Clic para enfocar en el Grafo RAG">
-              ✦ F${otherPara.paragraph_index + 1} en "${docName}" (${simPct}%)
-            </span>`;
-        }
-      });
-
-      return `
-        <div class="explorer-frag-row" style="border-left-color: ${colors.docBorder}">
-          <div class="explorer-frag-header">
-            <span class="explorer-frag-index" style="color: ${colors.docBorder}">Fragmento ${p.paragraph_index + 1}</span>
-          </div>
-          <div class="explorer-frag-text">${p.contextualized_text || p.raw_content}</div>
-          <div class="explorer-relations-section">
-            ${seqHtml}
-            ${semHtml}
-          </div>
-        </div>`;
-    }).join('');
-
-    return `
-      <div class="explorer-doc-card" id="exp-doc-${doc.id}">
-        <div class="explorer-doc-title" onclick="document.getElementById('exp-doc-${doc.id}').classList.toggle('collapsed')">
-          <div class="explorer-doc-title-left">
-            <span class="explorer-doc-badge" style="background: ${colors.docBg}; color: ${colors.docText}; border: 1px solid ${colors.docBorder}">${doc.mime_type.split('/').pop() || 'TXT'}</span>
-            <span>${doc.title}</span>
-          </div>
-          <div class="explorer-doc-arrow">▼</div>
-        </div>
-        <div class="explorer-doc-content">
-          ${fragsHtml.length > 0 ? fragsHtml : '<div class="empty-state">Este documento no contiene fragmentos.</div>'}
-        </div>
-      </div>`;
-  }).join('');
-}
 
 // Graph query → highlight relevant nodes
 btnGQuery.addEventListener('click', () => runGraphQuery());

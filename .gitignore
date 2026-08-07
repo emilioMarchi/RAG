@@ -4,3 +4,9 @@ dist/
 *.log
 data/
 release/
+tessdata/
+*.traineddata
+*.traineddata.gz
+temp_*.pdf
+temp_*.txt
+temp_*

@@ -10,6 +10,7 @@ export interface RAGSource {
   r2_url: string | null;
   document_id?: string;
   paragraph_index?: number;
+  similarity?: number;
 }
 
 export interface RAGResult {
@@ -23,7 +24,7 @@ export class HierarchicalRAGModule {
     private llm: LLMService
   ) {}
 
-  async query(userQuery: string, topDocs = 5, topParagraphs = 3): Promise<RAGResult> {
+  async query(userQuery: string, topDocs = 5, topParagraphs = 3, similarityThreshold = 0): Promise<RAGResult> {
     const baseQueryVector = await this.embedder.generateEmbedding(userQuery, 768);
 
     const candidateDocsRes = await query<{ id: string; title: string }>(
@@ -39,13 +40,21 @@ export class HierarchicalRAGModule {
 
     const highQueryVector = await this.embedder.generateEmbedding(userQuery, 1536);
 
+    const thresholdClause = similarityThreshold > 0 
+      ? `AND (1 - (p.embedding_high <=> $2::vector) / 2) >= $3`
+      : '';
+
     const paragraphsRes = await query<RAGSource>(
-      `SELECT p.raw_content, p.contextualized_text, d.title as doc_title, d.r2_key, d.r2_url
+      `SELECT p.raw_content, p.contextualized_text, d.title as doc_title, d.r2_key, d.r2_url,
+              (1 - (p.embedding_high <=> $2::vector) / 2) as similarity
        FROM document_paragraphs p
        JOIN documents d ON p.document_id = d.id
        WHERE p.document_id = ANY($1::uuid[])
-       ORDER BY p.embedding_high <=> $2::vector LIMIT $3`,
-      [candidateIds, JSON.stringify(highQueryVector), topParagraphs]
+       ${thresholdClause}
+       ORDER BY p.embedding_high <=> $2::vector LIMIT $${thresholdClause ? '4' : '3'}`,
+      thresholdClause 
+        ? [candidateIds, JSON.stringify(highQueryVector), similarityThreshold, topParagraphs]
+        : [candidateIds, JSON.stringify(highQueryVector), topParagraphs]
     );
 
     const retrievedParagraphs = paragraphsRes.rows;

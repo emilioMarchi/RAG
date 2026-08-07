@@ -498,30 +498,32 @@ async function updateSemanticRelations() {
 
     const relations = response.relations || [];
 
-    // 3. Renderizar enlaces semánticos cruzados con peso visual y físico ponderado
+    function getSemanticColor(similarity) {
+      const t = Math.max(0, Math.min(1, (similarity - 0.7) / 0.3));
+      
+      const r = Math.round(124 + t * (63 - 124));
+      const g = Math.round(58 + t * (185 - 58));
+      const b = Math.round(237 + t * (80 - 237));
+      
+      return `rgba(${r}, ${g}, ${b}, ${0.3 + t * 0.7})`;
+    }
+
+    function getSemanticWidth(similarity) {
+      return 1 + similarity * 4;
+    }
+
     relations.forEach(rel => {
       const { source_id, target_id, similarity } = rel;
       
-      let width = 1.5;
-      let color = '#7c3aed66'; // Morado translúcido base
-      
-      if (similarity >= 0.75 && similarity < 0.80) {
-        width = 1.5;
-        color = 'rgba(124, 58, 237, 0.4)'; // Morado translúcido
-      } else if (similarity >= 0.80 && similarity <= 0.90) {
-        width = 3;
-        color = '#a855f7'; // Morado brillante
-      } else if (similarity > 0.90) {
-        width = 5;
-        color = '#3fb950'; // Verde vibrante (glow-style)
-      }
+      const width = getSemanticWidth(similarity);
+      const color = getSemanticColor(similarity);
 
       edgesDS.add({
         from: `frag-${source_id}`,
         to: `frag-${target_id}`,
         width: width,
         color: { color: color, hover: color },
-        length: 240 + 120 * (1 - similarity), // Longitud base mayor para evitar colapso
+        length: 240 + 120 * (1 - similarity),
         physics: true,
         _type: 'semantic'
       });
@@ -855,6 +857,14 @@ chatInput.addEventListener('input', () => {
   chatInput.style.height = Math.min(chatInput.scrollHeight, 140) + 'px';
 });
 
+const chatThresholdSlider = document.getElementById('chat-similarity-threshold');
+const chatThresholdVal = document.getElementById('chat-threshold-val');
+if (chatThresholdSlider && chatThresholdVal) {
+  chatThresholdSlider.addEventListener('input', (e) => {
+    chatThresholdVal.textContent = e.target.value + '%';
+  });
+}
+
 async function sendChat() {
   const q = chatInput.value.trim();
   if (!q) return;
@@ -871,10 +881,12 @@ async function sendChat() {
   const loadingEl = appendMsg('assistant', '…', true);
 
   try {
+    const threshold = chatThresholdSlider ? parseFloat(chatThresholdSlider.value) / 100 : 0;
+    
     const result = await api('/api/query', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query: q, topDocs: 5, topParagraphs: 4 }),
+      body: JSON.stringify({ query: q, topDocs: 5, topParagraphs: 4, similarityThreshold: threshold }),
     });
 
     loadingEl.querySelector('.chat-bubble').textContent = result.answer;

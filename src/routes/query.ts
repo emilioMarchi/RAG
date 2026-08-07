@@ -13,17 +13,20 @@ export function createQueryRouter(
 
   router.post('/query', async (req: Request, res: Response) => {
     try {
-      const { query: userQuery, topDocs, topParagraphs } = req.body;
+      const { query: userQuery, topDocs, topParagraphs, similarityThreshold } = req.body;
 
       if (!userQuery || typeof userQuery !== 'string' || userQuery.trim().length === 0) {
         res.status(400).json({ error: 'Se requiere una consulta válida' });
         return;
       }
 
+      const threshold = typeof similarityThreshold === 'number' ? similarityThreshold : 0;
+
       const result = await rag.query(
         userQuery.trim(),
         topDocs || 5,
-        topParagraphs || 3
+        topParagraphs || 3,
+        threshold
       );
 
       res.json(result);
@@ -77,17 +80,20 @@ export function createQueryRouter(
   if (iterativeRag) {
     router.post('/query/iterative', async (req: Request, res: Response) => {
       try {
-        const { query: userQuery, topDocs, topParagraphs } = req.body;
+        const { query: userQuery, topDocs, topParagraphs, similarityThreshold } = req.body;
 
         if (!userQuery || typeof userQuery !== 'string' || userQuery.trim().length === 0) {
           res.status(400).json({ error: 'Se requiere una consulta válida' });
           return;
         }
 
+        const threshold = typeof similarityThreshold === 'number' ? similarityThreshold : 0;
+
         const result = await iterativeRag.query(
           userQuery.trim(),
           topDocs || 5,
-          topParagraphs || 3
+          topParagraphs || 3,
+          threshold
         );
 
         res.json(result);

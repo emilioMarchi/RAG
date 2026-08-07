@@ -13,7 +13,8 @@ export class IterativeRAGEngine {
   async query(
     userQuery: string,
     topDocs = 5,
-    topParagraphs = 3
+    topParagraphs = 3,
+    similarityThreshold = 0
   ): Promise<RAGResult & { iterations: number }> {
     const maxCtx = this.options.maxContextParagraphs ?? 20;
 
@@ -43,7 +44,7 @@ export class IterativeRAGEngine {
     const initialSourcesList: RAGSource[] = [];
     for (const subQ of subQueries) {
       const highQueryVector = await this.embedder.generateEmbedding(subQ, 1536);
-      const subSources = await this.searchParagraphs(candidateIds, highQueryVector, topParagraphs);
+      const subSources = await this.searchParagraphs(candidateIds, highQueryVector, topParagraphs, similarityThreshold);
       initialSourcesList.push(...subSources);
     }
 
@@ -110,16 +111,25 @@ export class IterativeRAGEngine {
   private async searchParagraphs(
     docIds: string[],
     queryVector: number[],
-    limit: number
+    limit: number,
+    similarityThreshold = 0
   ): Promise<RAGSource[]> {
+    const thresholdClause = similarityThreshold > 0
+      ? `AND (1 - (p.embedding_high <=> $2::vector) / 2) >= $3`
+      : '';
+
     const res = await query<RAGSource & { document_id: string; paragraph_index: number }>(
       `SELECT p.raw_content, p.contextualized_text, d.title as doc_title,
-              d.r2_key, d.r2_url, p.document_id, p.paragraph_index
+              d.r2_key, d.r2_url, p.document_id, p.paragraph_index,
+              (1 - (p.embedding_high <=> $2::vector) / 2) as similarity
        FROM document_paragraphs p
        JOIN documents d ON p.document_id = d.id
        WHERE p.document_id = ANY($1::uuid[])
-       ORDER BY p.embedding_high <=> $2::vector LIMIT $3`,
-      [docIds, JSON.stringify(queryVector), limit]
+       ${thresholdClause}
+       ORDER BY p.embedding_high <=> $2::vector LIMIT $${thresholdClause ? '4' : '3'}`,
+      thresholdClause
+        ? [docIds, JSON.stringify(queryVector), similarityThreshold, limit]
+        : [docIds, JSON.stringify(queryVector), limit]
     );
     return res.rows;
   }

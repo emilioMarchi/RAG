@@ -130,6 +130,13 @@
             <p>Hacé una pregunta sobre tus documentos.</p>
           </div>
         </div>
+        <div class="chat-controls" style="display: flex; gap: 12px; align-items: center; padding: 8px 12px; background: var(--bg-2); border-top: 1px solid var(--border); font-size: 12px;">
+          <div style="display: flex; align-items: center; gap: 8px; flex: 1;">
+            <label for="chat-similarity-threshold" style="color: var(--text-1); white-space: nowrap;">Umbral Similitud:</label>
+            <input type="range" id="chat-similarity-threshold" min="0" max="95" value="0" step="5" style="flex: 1; max-width: 200px;" />
+            <span id="chat-threshold-val" style="width: 35px; text-align: right; color: var(--text-2);">0%</span>
+          </div>
+        </div>
         <div class="chat-input-bar">
           <textarea id="chat-input" placeholder="Escribí tu consulta…" rows="1" autocomplete="off"></textarea>
           <button class="btn-send" id="btn-send">↑</button>

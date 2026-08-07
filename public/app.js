@@ -316,7 +316,16 @@ async function initGraph() {
     const nodeId = params.nodes[0];
     const node = nodesDS.get(nodeId);
     if (!node) return;
-    nodeDetailT.textContent = node.label || node.id;
+    
+    let title = node.label || node.id;
+    if (node._type === 'frag' && node._docId) {
+      const doc = documents.find(d => d.id === node._docId);
+      if (doc) {
+        title += ` — ${doc.title}`;
+      }
+    }
+    
+    nodeDetailT.textContent = title;
     nodeDetailB.textContent = node._content || '';
     nodeDetail.style.display = 'block';
   });
@@ -557,7 +566,14 @@ window.focusNodeInGraph = function(nodeId) {
     }, 900);
 
     const node = nodesDS.get(nodeId);
-    nodeDetailT.textContent = node.label || node.id;
+    let title = node.label || node.id;
+    if (node._type === 'frag' && node._docId) {
+      const doc = documents.find(d => d.id === node._docId);
+      if (doc) {
+        title += ` — ${doc.title}`;
+      }
+    }
+    nodeDetailT.textContent = title;
     nodeDetailB.textContent = node._content || '';
     nodeDetail.style.display = 'block';
   }

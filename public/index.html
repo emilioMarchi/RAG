@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self' http://localhost:3000 https://unpkg.com; script-src 'self' 'unsafe-inline' https://unpkg.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://unpkg.com; font-src https://fonts.gstatic.com">
+  <title>RAG Studio</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="https://unpkg.com/vis-network/styles/vis-network.min.css" />
+  <link rel="stylesheet" href="style.css" />
+  <!-- Cargar Vis.js desde CDN para máxima fiabilidad web y desktop -->
+  <script src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
+</head>
+<body>
+  <!-- Custom Title Bar -->
+  <header class="titlebar" id="titlebar">
+    <div class="titlebar-drag">
+      <span class="app-icon">⬡</span>
+      <span class="app-title">RAG Studio</span>
+    </div>
+    <div class="titlebar-controls">
+      <button id="btn-minimize" class="wc-btn wc-min" title="Minimizar">─</button>
+      <button id="btn-maximize" class="wc-btn wc-max" title="Maximizar">□</button>
+      <button id="btn-close"    class="wc-btn wc-close" title="Cerrar">✕</button>
+    </div>
+  </header>
+
+  <!-- Main Layout -->
+  <main class="layout">
+
+    <!-- LEFT PANEL: Document Manager -->
+    <aside class="panel-left" id="panel-left">
+      <div class="panel-header">
+        <h2 class="panel-title">Documentos</h2>
+        <span class="doc-count" id="doc-count">0</span>
+      </div>
+
+      <!-- Upload zone -->
+      <div class="upload-zone" id="upload-zone">
+        <div class="upload-icon">📄</div>
+        <p class="upload-label">Arrastrá archivos aquí</p>
+        <p class="upload-sub">PDF · DOCX · TXT · MD</p>
+        <button class="btn-upload" id="btn-pick-file">Seleccionar archivo</button>
+      </div>
+
+      <!-- Upload progress list -->
+      <div class="upload-queue" id="upload-queue"></div>
+
+      <!-- Document table -->
+      <div class="doc-list-wrapper">
+        <div class="doc-list-header">
+          <span>Archivo</span>
+          <span>Tipo</span>
+          <span>Fragmentos</span>
+          <span></span>
+        </div>
+        <div class="doc-list" id="doc-list">
+          <div class="empty-state">No hay documentos cargados aún.</div>
+        </div>
+        <!-- Pagination -->
+        <div class="pagination" id="pagination"></div>
+      </div>
+    </aside>
+
+    <!-- RESIZER -->
+    <div class="resizer" id="resizer"></div>
+
+    <!-- RIGHT PANEL: Graph + Chat -->
+    <section class="panel-right" id="panel-right">
+      <!-- Tabs -->
+      <div class="tab-bar">
+        <button class="tab active" data-tab="graph">Grafo de Relaciones</button>
+        <button class="tab" data-tab="relations-explorer">Explorador Jerárquico</button>
+        <button class="tab" data-tab="chat">Chat RAG</button>
+      </div>
+
+      <!-- Graph View -->
+      <div class="tab-content active" id="tab-graph">
+        <div class="graph-toolbar">
+          <!-- Leyenda dinámica: se llena con JS según los documentos cargados -->
+          <div class="graph-legend" id="graph-legend">
+            <span class="legend-item-static"><span class="legend-dot" style="background:#484f58;box-shadow:none"></span>Cargando…</span>
+          </div>
+          <div class="graph-slider-container">
+            <label for="similarity-threshold">Umbral Semántico: <span id="threshold-val">75</span>%</label>
+            <input type="range" id="similarity-threshold" min="50" max="100" value="75" step="1" />
+          </div>
+          <div class="graph-checkbox-container" style="display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-1); background: var(--bg-2); padding: 4px 12px; border-radius: var(--radius-sm); border: 1px solid var(--border);">
+            <input type="checkbox" id="toggle-relations" checked style="cursor: pointer;" />
+            <label for="toggle-relations" style="cursor: pointer; user-select: none; font-weight: 500; white-space: nowrap;">Ver Relaciones</label>
+          </div>
+          <div class="graph-controls">
+            <button class="btn-icon" id="btn-clear-query" title="Limpiar búsqueda" style="display:none">✕</button>
+            <button class="btn-icon" id="btn-reset-graph" title="Resetear física">⟳</button>
+            <button class="btn-icon" id="btn-fit-graph" title="Ajustar vista">⊡</button>
+          </div>
+        </div>
+        <div id="graph-container"></div>
+        <div class="graph-query-bar">
+          <input type="text" id="graph-query-input" placeholder="Buscar y resaltar nodos por relevancia semántica…" autocomplete="off" />
+          <button class="btn-search" id="btn-graph-query">Buscar</button>
+        </div>
+        <!-- Node detail panel -->
+        <div class="node-detail" id="node-detail" style="display:none">
+          <button class="node-detail-close" id="node-detail-close">✕</button>
+          <h4 class="node-detail-title" id="node-detail-title"></h4>
+          <p class="node-detail-body" id="node-detail-body"></p>
+        </div>
+      </div>
+
+      <!-- Explorador Jerárquico View -->
+      <div class="tab-content" id="tab-relations-explorer">
+        <div class="explorer-wrapper">
+          <div class="explorer-header">
+            <h3>Explorador de Relaciones Horizontales</h3>
+            <p class="explorer-subtitle">Visualización estructurada de los documentos, sus fragmentos (flujo secuencial) y las relaciones semánticas detectadas.</p>
+          </div>
+          <div class="explorer-tree" id="explorer-tree">
+            <div class="empty-state">Cargando la estructura del grafo...</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Chat View -->
+      <div class="tab-content" id="tab-chat">
+        <div class="chat-messages" id="chat-messages">
+          <div class="chat-welcome">
+            <div class="chat-welcome-icon">⬡</div>
+            <h3>RAG Studio</h3>
+            <p>Hacé una pregunta sobre tus documentos.</p>
+          </div>
+        </div>
+        <div class="chat-input-bar">
+          <textarea id="chat-input" placeholder="Escribí tu consulta…" rows="1" autocomplete="off"></textarea>
+          <button class="btn-send" id="btn-send">↑</button>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>

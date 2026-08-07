@@ -1,0 +1,1 @@
+Test document about RAG systems. RAG combines retrieval with generation for better answers.

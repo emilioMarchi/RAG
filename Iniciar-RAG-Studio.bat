@@ -1,74 +1,91 @@
 @echo off
 setlocal EnableDelayedExpansion
-chcp 65001 >nul 2>&1
 
 echo ============================================
-echo   RAG Studio - Inicio automatico (1ra vez)
+echo   RAG Studio - Launcher
 echo ============================================
 echo.
-
 cd /d "%~dp0"
 
-REM 1. Verificar Docker corriendo
-echo [1/6] Verificando Docker Desktop...
+REM 1. Check Docker running
+echo [1/6] Checking Docker Desktop...
 docker info >nul 2>&1
-if errorlevel 1 (
-  echo.
-  echo   [AVISO] Docker no esta corriendo.
-  echo   Por favor, abri Docker Desktop y espera a que termine de iniciar.
-  echo   Luego volve a ejecutar este archivo.
-  echo.
-  pause
-  exit /b 1
-)
+if errorlevel 1 goto nodocker
 echo       Docker OK.
 
-REM 2. Instalar dependencias si falta node_modules
-echo [2/6] Verificando dependencias...
-if not exist "node_modules" (
-  echo   Instalando dependencias (puede tardar)...
-  call npm install
-  if errorlevel 1 ( echo   [ERROR] npm install fallo. & pause & exit /b 1 )
-) else (
-  echo   node_modules ya presente.
-)
+REM 2. Install dependencies if missing
+echo [2/6] Checking dependencies...
+if exist "node_modules" goto deps_ok
+echo   Installing dependencies (this may take a while)...
+call npm install
+if errorlevel 1 goto npm_fail
+:deps_ok
+echo   node_modules already present.
 
-REM 3. Verificar/crear archivo .env
-echo [3/6] Verificando .env...
-if not exist ".env" (
-  echo.
-  echo   [INFO] No existe .env. Se creara una plantilla.
-  echo   Completa las API keys (Gemini y OpenRouter) en el archivo .env
-  echo   antes de usar la app.
-  echo.
-  copy ".env.example" ".env" >nul
-  if not exist ".env" ( echo   No se pudo crear .env & pause & exit /b 1 )
-)
+REM 3. Ensure .env exists
+echo [3/6] Checking .env...
+if exist ".env" goto env_ok
+echo   Creating .env from template...
+copy /y ".env.example" ".env" >nul
+if not exist ".env" goto env_fail
+echo   .env created. Fill in the API keys before using.
+:env_ok
 
-REM 4. Levantar contenedor de base de datos
-echo [4/6] Levantando base de datos (PostgreSQL + pgvector)...
+REM 4. Start database container
+echo [4/6] Starting database (PostgreSQL + pgvector)...
+docker container inspect pgvector >nul 2>&1
+if errorlevel 1 goto compose_up
+echo   Existing container found, starting it...
+docker start pgvector >nul 2>&1
+goto wait_db
+
+:compose_up
 docker compose up -d
-echo   Esperando que PostgreSQL este listo...
-for /l %%i in (1,1,40) do (
-  timeout /t 1 /nobreak >nul
-  docker exec pgvector pg_isready -U postgres >nul 2>&1
-  if not errorlevel 1 goto db_ready
-)
-echo   [ERROR] La base de datos no respondio a tiempo.
-pause
-exit /b 1
+
+:wait_db
+echo   Waiting for PostgreSQL to be ready...
+set /a tries=0
+:wait_db
+timeout /t 1 /nobreak >nul
+docker exec pgvector pg_isready -U postgres >nul 2>&1
+if not errorlevel 1 goto db_ready
+set /a tries+=1
+if %tries% GEQ 40 goto db_fail
+goto wait_db
 
 :db_ready
-echo   Base de datos lista.
+echo   Database ready.
 
-REM 5. Migraciones
-echo [5/6] Ejecutando migraciones...
+REM 5. Run migrations
+echo [5/6] Running migrations...
 call npm run migrate
-if errorlevel 1 ( echo   [ERROR] Migracion fallo. & pause & exit /b 1 )
+if errorlevel 1 goto migrate_fail
 
-REM 6. Arrancar la app
-echo [6/6] Iniciando RAG Studio...
-call npm run electron:dev
-
+REM 6. Launch app (web interface)
+echo [6/6] Starting RAG Studio (web)...
+start "" http://localhost:3000
+call npm run dev
 echo.
+goto end
+
+:nodocker
+echo.
+echo   [ERROR] Docker Desktop is not running.
+echo   Please open Docker Desktop, wait until ready, then rerun this file.
+echo.
+goto end
+
+:npm_fail
+echo   [ERROR] npm install failed.
+goto end
+
+:env_fail
+echo   [ERROR] Could not create .env
+goto end
+
+:migrate_fail
+echo   [ERROR] Migration failed.
+goto end
+
+:end
 pause

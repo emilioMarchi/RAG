@@ -1,7 +1,7 @@
 import { createInterface } from 'readline';
 import { EmbeddingService } from './services/embeddingService.js';
 import { LLMService } from './services/llmService.js';
-import { R2StorageService } from './services/r2Service.js';
+import { StorageService } from './services/r2Service.js';
 import { ChunkingService } from './services/chunkingService.js';
 import { IngestionPipeline } from './services/ingestionPipeline.js';
 import { HierarchicalRAGModule } from './services/ragEngine.js';
@@ -12,7 +12,7 @@ const embedder = new EmbeddingService();
 const llm = new LLMService();
 const rag = new HierarchicalRAGModule(embedder, llm);
 const iterativeRag = new IterativeRAGEngine(embedder, llm);
-const pipeline = new IngestionPipeline(embedder, llm, new R2StorageService());
+const pipeline = new IngestionPipeline(embedder, llm, new StorageService());
 const chunker = new ChunkingService();
 
 const rl = createInterface({
@@ -75,7 +75,7 @@ async function ingestFile(filePath: string) {
 
     console.log(`Ingestando: ${fileName}...`);
     const fullContentText = await chunker.extractText(filePath, mimeType);
-    const paragraphs = chunker.splitIntoParagraphs(fullContentText);
+    const paragraphs = chunker.splitIntoParagraphs(fullContentText, mimeType);
     console.log(`  Párrafos extraídos: ${paragraphs.length}`);
 
     const result = await pipeline.processAndStoreDocument({

@@ -3,7 +3,7 @@ import { LLMService } from '../src/services/llmService.js';
 import { IterativeRAGEngine } from '../src/services/iterativeRAGEngine.js';
 import { ChunkingService } from '../src/services/chunkingService.js';
 import { IngestionPipeline } from '../src/services/ingestionPipeline.js';
-import { R2StorageService } from '../src/services/r2Service.js';
+import { StorageService } from '../src/services/r2Service.js';
 import { pool, query } from '../src/config/db.js';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -14,7 +14,7 @@ async function run() {
   const llm = new LLMService();
   const engine = new IterativeRAGEngine(embedder, llm);
   const chunker = new ChunkingService();
-  const pipeline = new IngestionPipeline(embedder, llm, new R2StorageService());
+  const pipeline = new IngestionPipeline(embedder, llm, new StorageService());
 
   // 1. Validar si hay documentos, si no, ingestar test-doc.md
   const docsCount = await query('SELECT COUNT(*)::int as count FROM documents');

@@ -4,7 +4,7 @@ import { env } from './config/env.js';
 import { pool } from './config/db.js';
 import { EmbeddingService } from './services/embeddingService.js';
 import { LLMService } from './services/llmService.js';
-import { R2StorageService } from './services/r2Service.js';
+import { StorageService } from './services/r2Service.js';
 import { ChunkingService } from './services/chunkingService.js';
 import { IngestionPipeline } from './services/ingestionPipeline.js';
 import { HierarchicalRAGModule } from './services/ragEngine.js';
@@ -28,13 +28,13 @@ app.use(express.static(path.join(__dirname, '..', 'public')));
 
 const embedder = new EmbeddingService();
 const llm = new LLMService();
-const storage = new R2StorageService();
+const storage = new StorageService();
 const chunker = new ChunkingService();
 const pipeline = new IngestionPipeline(embedder, llm, storage);
 const rag = new HierarchicalRAGModule(embedder, llm);
 const iterativeRag = new IterativeRAGEngine(embedder, llm);
 
-app.use('/api', createDocumentRouter(pipeline, chunker));
+app.use('/api', createDocumentRouter(pipeline, chunker, storage));
 app.use('/api', createQueryRouter(rag, iterativeRag));
 
 app.get('/api/health', (_req, res) => {

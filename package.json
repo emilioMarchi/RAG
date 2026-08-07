@@ -54,7 +54,9 @@
     "multer": "^2.2.0",
     "openai": "^6.49.0",
     "pdf-parse": "^2.4.5",
+    "pdf-to-img": "^6.2.0",
     "pg": "^8.22.0",
+    "tesseract.js": "^7.0.0",
     "vis-network": "^10.1.0"
   },
   "devDependencies": {

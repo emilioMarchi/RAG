@@ -1,25 +1,10 @@
-> rag-studio@1.0.0 build
-> tsc
-
-src/services/chunkingService.ts:43:33 - error TS2339: Property 'default' does not exist on type 'typeof import("D:/Emi/apps/RAG/node_modules/pdf-parse/dist/pdf-parse/esm/index")'.
-
-43     const data = await pdfParse.default(dataBuffer);
-                                   ~~~~~~~
-
-
-Found 1 error in src/services/chunkingService.ts:43
-
-PS D:\Emi\apps\RAG> npm run build
-
-> rag-studio@1.0.0 build
-> tsc
-
-src/services/chunkingService.ts:43:38 - error TS2339: Property 'default' does not exist on type 'typeof import("D:/Emi/apps/RAG/node_modules/pdf-parse/dist/pdf-parse/esm/index")'.
-
-43     const pdfParse = (pdfParseModule.default ?? pdfParseModule) as (buf: Buffer) => Promise<{ text: string }>;
-                                        ~~~~~~~
-
-
-Found 1 error in src/services/chunkingService.ts:43
-
-PS D:\Emi\apps\RAG>
+¿Cuál es la IP del balanceador afectado por la vulnerabilidad de TLS, qué script de mitigación debe ejecutarse según el manual y cuál es el umbral de la alerta de Datadog asignada al Ing. Sofía Rossi?
+No dispongo de esa información.
+📄 documento_manual_operativo_rag_aethercore.pdf
+Datos Requeridos del Doc 3 (Manual / Runbook) ¿Qué script específico resolvió el incumplimiento de logs de 18 días en la IP 10.242.12.88? Especifica la regla de purga de
+📄 documento_manual_operativo_rag_aethercore.pdf
+Si el cuórum es menor al 50% (por ejemplo, 2 de 5 nodos activos), aislar temporalmente el tráfico de sincronización dañado utilizando la siguiente regla de iptables en el nodo maestro local: # Aislamiento de tráfico anómalo en puerto AetherGuard sudo iptables -A INPUT -p tcp --dport 9094 -m string --algo bm --string "BAD_RAFT_HEADER" -j DROP sudo iptables -A INPUT -p tcp --dport 9094 -s 10.242.12.0/24 -j ACCEPT Fase 2: Forzado de Líder y Restauración de Cuórum Ejecutar el comando de recuperación forzada sobre el nodo de mayor disponibilidad de la región afectada (por ejemplo, en SA-EAST-1 ): aether-ctl cluster recover --force-leader --node-id=node-01-sa --region=SA-EAST-1 --timeout=30s Validar que la latencia p99 descienda por debajo del umbral nominal de la región (18.4 ms para San Pablo). Restablecer el flujo normal del puerto 9094 eliminando las reglas temporales de iptables . SECCIÓN 4. REGLAS DE ALERTA DE PROMETHEUS (PROMQL) Y MONITOREO El sistema de monitoreo recopila métricas cada 5 segundos mediante un agente de Prometheus local. Las alertas críticas de Nivel P1 se disparan automáticamente en Slack y PagerDuty según la definición del siguiente archivo de reglas aether_alerts.yml : 1. 2. 1.
+📄 documento_manual_operativo_rag_aethercore.pdf
+18.4 ms para SA-EAST-1 . Registra la latencia real de 42.8 ms y la ejecución exitosa de SOP-882 en 12 minutos. Proporciona el código de la regla AetherLatencyP99High y el comando exacto aether-ctl cluster recover . ¿Quién es el contacto responsable del bloque CIDR 10.242.0.0/16 y qué módulo HSM supervisa? Menciona al Ing. Carlos Zalazar y el modelo HSM Thales Luna K7. Confirma la auditoría del HSM Thales Luna K7 y la región de San Pablo. Mapea el CIDR 10.242.0.0/16 al nodo node-01-sa administrado por Ing. Carlos Zalazar. Conclusión del Corpus de Prueba RAG Con la adición de este tercer documento, el sistema RAG puede evaluar estrategias avanzadas de re-ranking (como Cohere Rerank o BGE-Reranker), compresión de contexto y consultas de grafos de conocimiento entre documentos estructurados (especificaciones, auditorías y manuales técnicos). AetherCore v4.5 — Manual de Arquitectura & Disaster Recovery (DOC-DR-2026-900) Página 4 de 4
+📄 documento_manual_operativo_rag_aethercore.pdf
+10.242.12.88 . ¿Qué regla de Prometheus se disparó durante el incidente INC-8821 y qué comando de SOP-882 lo solucionó? Define el puerto 9094 y la latencia máxima objetivo de

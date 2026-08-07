@@ -26,16 +26,16 @@ describe('LLMService', () => {
     llm = new LLMService()
   })
 
-  it('enrichChunk returns parsed JSON', async () => {
+  it('enrichChunk returns parsed JSON and assembles contextualized', async () => {
     mockCreate.mockResolvedValue({
       choices: [{ message: { content: JSON.stringify({
-        contextualized_text: 'ctx',
+        context_prefix: 'contexto del doc',
         keywords: ['k1'],
         category: 'cat'
       }) } }]
     })
     const res = await llm.enrichChunk('Doc', 'Summary', 'Chunk text')
-    expect(res.contextualized_text).toBe('ctx')
+    expect(res.contextualized_text).toBe('contexto del doc - Fragmento: Chunk text')
     expect(res.keywords).toEqual(['k1'])
     expect(res.category).toBe('cat')
   })

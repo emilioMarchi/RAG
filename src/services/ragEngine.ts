@@ -45,7 +45,7 @@ export class HierarchicalRAGModule {
       : '';
 
     const paragraphsRes = await query<RAGSource>(
-      `SELECT p.raw_content, p.contextualized_text, d.title as doc_title, d.r2_key, d.r2_url,
+      `SELECT p.raw_content, p.contextualized_text, p.paragraph_index, d.title as doc_title, d.r2_key, d.r2_url,
               (1 - (p.embedding_high <=> $2::vector) / 2) as similarity
        FROM document_paragraphs p
        JOIN documents d ON p.document_id = d.id
@@ -60,7 +60,7 @@ export class HierarchicalRAGModule {
     const retrievedParagraphs = paragraphsRes.rows;
 
     const contextText = retrievedParagraphs
-      .map((p, i) => `[Fuente ${i + 1} - ${p.doc_title}]:\n${p.contextualized_text}`)
+      .map((p, i) => `[Fuente ${i + 1} - ${p.doc_title} (fragmento ${p.paragraph_index})]:\n${p.contextualized_text}`)
       .join('\n\n');
 
     const answer = await this.llm.generateRAGAnswer(userQuery, contextText);

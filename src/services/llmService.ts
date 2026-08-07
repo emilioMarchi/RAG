@@ -14,6 +14,60 @@ export class LLMService {
     this.defaultModel = env.LLM_MODEL;
   }
 
+  private parseJSON<T>(content: string): T {
+    const start = content.indexOf('{');
+    const end = content.lastIndexOf('}');
+    const candidate = start !== -1 && end !== -1 && end > start
+      ? content.slice(start, end + 1)
+      : content;
+
+    let raw = candidate;
+    try {
+      return JSON.parse(raw) as T;
+    } catch {
+      // El LLM a veces inserta caracteres de control crudos (saltos de línea,
+      // tabs) *dentro* de los literales de string sin escaparlos. Los whitespace
+      // entre tokens JSON sí son válidos y no deben tocarse, así que escapamos
+      // solo el interior de las cadenas (con un escáner que respeta comillas).
+      raw = this.escapeControlCharsInsideStrings(raw);
+      return JSON.parse(raw) as T;
+    }
+  }
+
+  private escapeControlCharsInsideStrings(input: string): string {
+    const chars = [...input];
+    let out = '';
+    let inString = false;
+    let prevSlash = 0;
+    for (let i = 0; i < chars.length; i++) {
+      const ch = chars[i];
+      if (inString) {
+        if (ch === '"' && prevSlash % 2 === 0) {
+          inString = false;
+          out += ch;
+        } else if (ch === '\t') {
+          out += '\\t';
+        } else if (ch === '\r') {
+          out += '\\r';
+        } else if (ch === '\n') {
+          out += '\\n';
+        } else if (ch.charCodeAt(0) < 0x20 && ch !== '\\') {
+          // otros controles crudos dentro del string
+          out += `\\u${ch.charCodeAt(0).toString(16).padStart(4, '0')}`;
+        } else {
+          out += ch;
+        }
+      } else {
+        if (ch === '"') {
+          inString = true;
+        }
+        out += ch;
+      }
+      prevSlash = ch === '\\' ? prevSlash + 1 : 0;
+    }
+    return out;
+  }
+
   async enrichChunk(documentTitle: string, docSummary: string, chunkText: string) {
     return withRetry(
       async () => {
@@ -25,9 +79,9 @@ DOCUMENTO: "${documentTitle}"
 RESUMEN GENERAL: "${docSummary}"
 FRAGMENTO: "${chunkText}"
 
-Devuelve ESTRICTAMENTE un JSON con el siguiente formato:
+Devuelve ESTRICTAMENTE un JSON con el siguiente formato (NO copies el fragmento en la respuesta):
 {
-  "contextualized_text": "[Antepone un contexto de 1 oracion que ubique al fragmento en el documento] - Fragmento: ${chunkText}",
+  "context_prefix": "[Antepone un contexto de 1 oracion que ubique al fragmento en el documento, sin repetir el texto del fragmento]",
   "keywords": ["tag1", "tag2"],
   "category": "Nombre de categoría principal"
 }
@@ -43,14 +97,26 @@ Devuelve ESTRICTAMENTE un JSON con el siguiente formato:
         const content = response.choices[0].message.content;
         if (!content) throw new Error('LLM returned empty response during enrichment');
 
-        return JSON.parse(content) as {
-          contextualized_text: string;
+        const parsed = this.parseJSON<{
+          context_prefix: string;
           keywords: string[];
           category: string;
+        }>(content);
+
+        return {
+          contextualized_text: this.assembleContextualized(parsed.context_prefix, chunkText),
+          keywords: Array.isArray(parsed.keywords) ? parsed.keywords : [],
+          category: parsed.category || 'general',
         };
       },
       { maxRetries: 3, baseDelay: 2000, label: 'enrich-chunk' }
     );
+  }
+
+  private assembleContextualized(prefix: string, chunkText: string): string {
+    const cleanPrefix = (prefix || '').replace(/\s+/g, ' ').trim();
+    if (!cleanPrefix) return chunkText;
+    return `${cleanPrefix} - Fragmento: ${chunkText}`;
   }
 
   async evaluateContext(userQuery: string, contextText: string): Promise<{
@@ -92,11 +158,13 @@ Responde ESTRICTAMENTE con este JSON:
 }
 
 REGLAS:
-- Si la info está completa o no está en el contexto → decision: "answer"
-- Si el contexto menciona un tema pero claramente falta el detalle que sigue → "expand"
+- Si la info está completa O si responder con el contexto actual es lo mejor que se puede → decision: "answer"
+- Si el contexto menciona un tema pero claramente falta el detalle que sigue y ese detalle puede estar en párrafos ADYACENTES del mismo documento → "expand"
+- Si el dato que falta no parece estar en los párrafos cercanos (el fragmento ya cubre el tema, o es un dato de otro documento no recuperado), NO pidas expandir: responde "answer" y continúa con lo que haya. Evita pedir más contexto repetidas veces sin progreso.
 - expand_requests SOLO si decision es "expand"
 - direction "before" = párrafos anteriores, "after" = siguientes
 - count: cuántos párrafos adjuntos pedir (máx 3)
+- En "reason" indica el fragmento del contexto que apoyó tu decisión
 `;
 
         const response = await client.chat.completions.create({
@@ -110,7 +178,7 @@ REGLAS:
         console.log(`[EVALUATE DEBUG] LLM raw response: ${content}`);
         if (!content) throw new Error('LLM returned empty response during context evaluation');
 
-        return JSON.parse(content);
+        return this.parseJSON(content);
       },
       { maxRetries: 2, baseDelay: 2000, label: 'evaluate-context' }
     );
@@ -122,6 +190,10 @@ REGLAS:
         const systemPrompt = `
 Eres un asistente preciso y directo. Responde a la pregunta del usuario utilizando EXCLUSIVAMENTE la información provista en el CONTEXTO.
 Si la respuesta no está en el contexto, indica amablemente que no dispones de esa información.
+
+IMPORTANTE: Los fragmentos recuperados suelen contener SOLO parte de lo preguntado. No respondas "No dispongo de esa información" de forma genérica: responde con todo lo que SÍ aparece en el contexto y, si faltan datos, indícalo de forma específica (qué dato concreto falta). Si el contexto contiene algo relevante, úsalo y no lo ocultes.
+
+CITA LAS FUENTES: cada vez que respuestas apoye en un bloque de contexto, menciónalo citando el NOMBRE del documento con su número de fragmento, con el formato exacto del encabezado de cada bloque (por ejemplo: "(Documento Técnico de Referencia: AetherCore v4.5, fragmento 3)"). Usa el nombre de documento y el número de fragmento tal como aparecen en el tag tipo "[Fuente N - {titulo} (fragmento X)]". No te refieras a "Fuente 1" o "Fuente 2": usa siempre el título real del documento y el número de fragmento correspondiente.
 
 --- CONTEXTO RECUPERADO ---
 ${contextText}
@@ -191,7 +263,7 @@ CONSULTA ORIGINAL: "${userQuery}"
         console.log(`[DECOMPOSE DEBUG] LLM raw response: ${content}`);
         if (!content) throw new Error('LLM returned empty response during query decomposition');
 
-        const parsed = JSON.parse(content) as { sub_queries: string[] };
+        const parsed = this.parseJSON<{ sub_queries: string[] }>(content);
         if (!Array.isArray(parsed.sub_queries) || parsed.sub_queries.length === 0) {
           return [userQuery];
         }

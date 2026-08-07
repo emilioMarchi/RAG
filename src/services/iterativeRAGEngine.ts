@@ -7,8 +7,15 @@ export class IterativeRAGEngine {
   constructor(
     private embedder: EmbeddingService,
     private llm: LLMService,
-    private options: { maxContextParagraphs?: number } = {}
+    private options: {
+      maxContextParagraphs?: number;
+      maxIterations?: number;
+    } = {}
   ) {}
+
+  private get maxIterations(): number {
+    return this.options.maxIterations ?? 4;
+  }
 
   async query(
     userQuery: string,
@@ -56,26 +63,35 @@ export class IterativeRAGEngine {
 
     // 4. Formatear contexto enriquecido para la evaluación del LLM
     const formatContext = (srcs: RAGSource[]) => srcs
-      .map((p, i) => `[Fuente ${i + 1} - ${p.doc_title} (docId: ${(p as any).document_id}, paragraphIndex: ${(p as any).paragraph_index})]:\n${p.contextualized_text}`)
+      .map((p, i) => `[Fuente ${i + 1} - ${p.doc_title} (fragmento ${(p as any).paragraph_index})]:\n${p.contextualized_text}`)
       .join('\n\n');
 
-    const initialContextText = formatContext(sources);
+    // 5. Bucle iterativo: evaluar si el contexto es suficiente; si pide expandir,
+    //    recuperar y volver a evaluar, hasta que el LLM diga "answer", no haya más
+    //    información nueva que agregar, o se alcance el tope de iteraciones.
+    let iterations = 0;
+    let previousCount = -1;
 
-    // 5. Evaluar si el contexto es suficiente o requiere expansión
-    const evaluation = await this.llm.evaluateContext(userQuery, initialContextText);
+    while (iterations < this.maxIterations) {
+      iterations += 1;
 
-    let iterations = 1;
-    if (evaluation.decision === 'expand' && evaluation.expand_requests && evaluation.expand_requests.length > 0) {
-      iterations = 2;
+      const contextText = formatContext(sources);
+      const evaluation = await this.llm.evaluateContext(userQuery, contextText);
+
+      // El LLM considera el contexto suficiente (o la info no está disponible).
+      if (evaluation.decision !== 'expand' || !evaluation.expand_requests?.length) {
+        break;
+      }
+
+      // Recuperar los párrafos solicitados.
       const expanded: RAGSource[] = [];
-
       for (const req of evaluation.expand_requests) {
-        // Resolver robustamente el docId (puede venir como título o UUID)
         let resolvedDocId = req.docId;
-        const matching = sources.find(s => 
+        const matching = sources.find(s =>
           (s as any).document_id === req.docId ||
           s.doc_title === req.docId ||
-          `Fuente ${sources.indexOf(s) + 1}`.includes(req.docId)
+          s.doc_title.includes(req.docId) ||
+          req.docId.includes(s.doc_title)
         );
         if (matching) {
           resolvedDocId = (matching as any).document_id;
@@ -92,12 +108,19 @@ export class IterativeRAGEngine {
         }
       }
 
-      sources = this.mergeSources(sources, expanded, maxCtx);
+      const newSources = this.mergeSources(sources, expanded, maxCtx);
+
+      // No hay información nueva → detenerse (no hay más que recuperar).
+      if (newSources.length === previousCount || newSources.length === sources.length) {
+        sources = newSources;
+        break;
+      }
+
+      previousCount = sources.length;
+      sources = newSources;
     }
 
-    const finalContextText = sources
-      .map((p, i) => `[Fuente ${i + 1} - ${p.doc_title}]:\n${p.contextualized_text}`)
-      .join('\n\n');
+    const finalContextText = formatContext(sources);
 
     const answer = await this.llm.generateRAGAnswer(userQuery, finalContextText);
 

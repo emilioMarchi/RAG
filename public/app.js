@@ -281,7 +281,15 @@ async function initGraph() {
         iterations: 400,
         updateInterval: 25
       },
-      minVelocity: 0.75              // Velocidad mínima para detener el movimiento rápido
+      // La física queda activa tras estabilizar para que los nodos se puedan
+      // arrastrar de forma elástica (moviendo el clúster conectado). La velocidad
+      // mínima alta evita que siga orbitando indefinidamente.
+      minVelocity: 0.75,
+      maxVelocity: 50,
+      timestep: 0.5,
+      wind: { x: 0, y: 0 },
+      adaptiveTimestep: true,
+      smoothSimulation: true
     },
     nodes: {
       shape: 'dot',
@@ -306,9 +314,11 @@ async function initGraph() {
 
   network = new vis.Network(graphCont, { nodes: nodesDS, edges: edgesDS }, options);
 
-  // Congelar el grafo una vez estabilizado para evitar que orbite infinitamente
+  // Cuando se estabiliza por primera vez simplemente dejamos la física en
+  // movimiento suave (no la apagamos) para que los nodos puedan arrastrarse
+  // elásticamente, tanto con relaciones activas como sin ellas.
   network.on("stabilizationIterationsDone", function () {
-    network.setOptions({ physics: { enabled: false } });
+    network.setOptions({ physics: { enabled: true, stabilization: { enabled: false } } });
   });
 
   network.on('click', (params) => {
@@ -551,19 +561,14 @@ window.focusNodeInGraph = function(nodeId) {
   const graphTabBtn = document.querySelector('.tab[data-tab="graph"]');
   if (graphTabBtn) graphTabBtn.click();
 
-  if (network && nodesDS.get(nodeId)) {
-    // Volver a activar físicas por un momento si están apagadas
-    network.setOptions({ physics: { enabled: true } });
-    network.selectNodes([nodeId]);
+if (network && nodesDS.get(nodeId)) {
+      // Mantener la física activa para un movimiento elástico fluido al enfocar
+      network.setOptions({ physics: { enabled: true, stabilization: { enabled: false } } });
+      network.selectNodes([nodeId]);
     network.focus(nodeId, {
       scale: 1.4,
       animation: { duration: 800, easingFunction: 'easeInOutQuad' }
     });
-    
-    // Detener de nuevo tras enfocar
-    setTimeout(() => {
-      network.setOptions({ physics: { enabled: false } });
-    }, 900);
 
     const node = nodesDS.get(nodeId);
     let title = node.label || node.id;
@@ -804,7 +809,7 @@ async function sendChat() {
   try {
     const threshold = chatThresholdSlider ? parseFloat(chatThresholdSlider.value) / 100 : 0;
     
-    const result = await api('/api/query', {
+    const result = await api('/api/query/iterative', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ query: q, topDocs: 5, topParagraphs: 4, similarityThreshold: threshold }),
@@ -812,6 +817,13 @@ async function sendChat() {
 
     loadingEl.querySelector('.chat-bubble').textContent = result.answer;
     loadingEl.querySelector('.chat-bubble').classList.remove('loading');
+
+    if (result.iterations !== undefined) {
+      const itEl = document.createElement('div');
+      itEl.className = 'chat-iterations';
+      itEl.textContent = `🔁 ${result.iterations} iteración${result.iterations === 1 ? '' : 'es'}`;
+      loadingEl.appendChild(itEl);
+    }
 
     if (result.sources?.length) {
       const sourcesEl = document.createElement('div');

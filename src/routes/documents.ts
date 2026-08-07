@@ -4,14 +4,15 @@ import { IngestionPipeline } from '../services/ingestionPipeline.js';
 import { ChunkingService } from '../services/chunkingService.js';
 import { EmbeddingService } from '../services/embeddingService.js';
 import { LLMService } from '../services/llmService.js';
-import { R2StorageService } from '../services/r2Service.js';
+import { StorageService } from '../services/r2Service.js';
 import { query } from '../config/db.js';
 
 const upload = multer({ storage: multer.memoryStorage() });
 
 export function createDocumentRouter(
   pipeline: IngestionPipeline,
-  chunker: ChunkingService
+  chunker: ChunkingService,
+  storage: StorageService
 ): Router {
   const router = Router();
 
@@ -32,7 +33,7 @@ export function createDocumentRouter(
       const fullContentText = await chunker.extractText(tempPath, mimeType);
       fs.unlinkSync(tempPath);
 
-      const paragraphs = chunker.splitIntoParagraphs(fullContentText);
+      const paragraphs = chunker.splitIntoParagraphs(fullContentText, mimeType);
 
       if (paragraphs.length === 0) {
         res.status(400).json({ error: 'No se pudo extraer contenido del archivo' });
@@ -100,8 +101,7 @@ export function createDocumentRouter(
 
       const r2Key = docRes.rows[0].r2_key;
 
-      const r2Service = new R2StorageService();
-      await r2Service.deleteFile(r2Key);
+      await storage.deleteFile(r2Key);
 
       await query('DELETE FROM documents WHERE id = $1', [id]);
 

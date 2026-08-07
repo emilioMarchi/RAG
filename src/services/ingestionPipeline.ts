@@ -1,6 +1,6 @@
 import { EmbeddingService } from './embeddingService.js';
 import { LLMService } from './llmService.js';
-import { R2StorageService } from './r2Service.js';
+import { StorageService } from './r2Service.js';
 import { getClient } from '../config/db.js';
 import { mapConcurrent } from '../utils/concurrency.js';
 
@@ -15,7 +15,7 @@ export class IngestionPipeline {
   constructor(
     private embedder: EmbeddingService,
     private llm: LLMService,
-    private storage: R2StorageService
+    private storage: StorageService
   ) {}
 
   async processAndStoreDocument(params: {
@@ -40,7 +40,7 @@ export class IngestionPipeline {
       const docRes = await client.query(
         `INSERT INTO documents (title, content, r2_key, r2_url, mime_type, embedding_base)
          VALUES ($1, $2, $3, $4, $5, $6::vector) RETURNING id`,
-        [title, fullContentText, uploadResult.r2Key, uploadResult.publicUrl, mimeType, JSON.stringify(baseVector)]
+        [title, fullContentText, uploadResult.key, uploadResult.publicUrl, mimeType, JSON.stringify(baseVector)]
       );
       const docId = docRes.rows[0].id;
       const docSummary = this.generateDocSummary(fullContentText);
@@ -83,7 +83,7 @@ export class IngestionPipeline {
 
       return {
         docId,
-        r2Key: uploadResult.r2Key,
+        r2Key: uploadResult.key,
         paragraphsProcessed: paragraphs.length,
       };
     } catch (error) {

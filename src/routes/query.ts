@@ -2,16 +2,54 @@ import { Router, Request, Response } from 'express';
 import { HierarchicalRAGModule } from '../services/ragEngine.js';
 import { IterativeRAGEngine } from '../services/iterativeRAGEngine.js';
 import { EmbeddingService } from '../services/embeddingService.js';
+import { LLMService } from '../services/llmService.js';
+import { QueryEvaluator } from '../services/queryEvaluator.js';
 import { query } from '../config/db.js';
 
 export function createQueryRouter(
   rag: HierarchicalRAGModule,
-  iterativeRag?: IterativeRAGEngine
+  iterativeRag?: IterativeRAGEngine,
+  llm?: LLMService
 ): Router {
   const router = Router();
   const embedder = new EmbeddingService();
+  const evaluator = llm ? new QueryEvaluator(llm) : null;
 
   router.post('/query', async (req: Request, res: Response) => {
+    try {
+      const { query: userQuery, topDocs, topParagraphs, similarityThreshold } = req.body;
+
+      if (!userQuery || typeof userQuery !== 'string' || userQuery.trim().length === 0) {
+        res.status(400).json({ error: 'Se requiere una consulta válida' });
+        return;
+      }
+
+      const threshold = typeof similarityThreshold === 'number' ? similarityThreshold : 0;
+
+      // Si el engine iterativo está disponible, es el default (incluye hybrid search + reranking)
+      const engine = iterativeRag ?? rag;
+      const result = await engine.query(
+        userQuery.trim(),
+        topDocs || 5,
+        topParagraphs || 20,
+        threshold
+      );
+
+      res.json(result);
+    } catch (error) {
+      console.error('Query error:', error);
+      res.status(500).json({
+        error: 'Error al procesar la consulta',
+        details: error instanceof Error ? error.message : 'Unknown error',
+      });
+    }
+  });
+
+  /**
+   * POST /api/query/simple
+   * Motor RAG jerárquico básico sin descomposición de queries ni expansión iterativa.
+   */
+  router.post('/query/simple', async (req: Request, res: Response) => {
     try {
       const { query: userQuery, topDocs, topParagraphs, similarityThreshold } = req.body;
 
@@ -25,13 +63,13 @@ export function createQueryRouter(
       const result = await rag.query(
         userQuery.trim(),
         topDocs || 5,
-        topParagraphs || 3,
+        topParagraphs || 20,
         threshold
       );
 
       res.json(result);
     } catch (error) {
-      console.error('Query error:', error);
+      console.error('Simple query error:', error);
       res.status(500).json({
         error: 'Error al procesar la consulta',
         details: error instanceof Error ? error.message : 'Unknown error',
@@ -88,13 +126,33 @@ export function createQueryRouter(
         }
 
         const threshold = typeof similarityThreshold === 'number' ? similarityThreshold : 0;
+        const t0 = Date.now();
 
         const result = await iterativeRag.query(
           userQuery.trim(),
           topDocs || 5,
-          topParagraphs || 3,
+          topParagraphs || 10,
           threshold
         );
+
+        const latencyMs = Date.now() - t0;
+
+        // Registrar y evaluar en background (fire-and-forget)
+        if (evaluator) {
+          const contextText = result.sources
+            .map((s, i) => `[${i+1}] ${s.doc_title}: ${s.raw_content.substring(0, 300)}`)
+            .join('\n');
+
+          evaluator.recordAndEvaluate({
+            queryText: userQuery.trim(),
+            answerText: result.answer,
+            contextText,
+            sourcesCount: result.sources.length,
+            cragDecision: result.cragDecision,
+            iterations: result.iterations,
+            latencyMs,
+          }).catch(err => console.error('[QueryEvaluator] recordAndEvaluate error:', err));
+        }
 
         res.json(result);
       } catch (error) {
@@ -106,6 +164,80 @@ export function createQueryRouter(
       }
     });
   }
+
+  /**
+   * GET /api/evaluations/stats
+   * Estadísticas agregadas de calidad del sistema (Fase 4 - Ragas backend).
+   */
+  router.get('/evaluations/stats', async (_req: Request, res: Response) => {
+    try {
+      const result = await query<{
+        total: number;
+        evaluated: number;
+        pending: number;
+        avg_faithfulness: number | null;
+        avg_relevance: number | null;
+        avg_latency_ms: number | null;
+        avg_iterations: number | null;
+      }>(
+        `SELECT
+           COUNT(*)::int AS total,
+           COUNT(*) FILTER (WHERE evaluated)::int AS evaluated,
+           COUNT(*) FILTER (WHERE NOT evaluated)::int AS pending,
+           ROUND(AVG(faithfulness_score) FILTER (WHERE evaluated)::numeric, 3) AS avg_faithfulness,
+           ROUND(AVG(answer_relevance_score) FILTER (WHERE evaluated)::numeric, 3) AS avg_relevance,
+           ROUND(AVG(latency_ms)::numeric, 1) AS avg_latency_ms,
+           ROUND(AVG(iterations)::numeric, 2) AS avg_iterations
+         FROM query_evaluations`
+      );
+      const row = result.rows[0];
+      res.json({
+        total: row?.total ?? 0,
+        evaluated: row?.evaluated ?? 0,
+        pending: row?.pending ?? 0,
+        avg_faithfulness: row?.avg_faithfulness !== null ? Number(row.avg_faithfulness) : null,
+        avg_relevance: row?.avg_relevance !== null ? Number(row.avg_relevance) : null,
+        avg_latency_ms: row?.avg_latency_ms !== null ? Number(row.avg_latency_ms) : null,
+        avg_iterations: row?.avg_iterations !== null ? Number(row.avg_iterations) : null,
+      });
+    } catch (error) {
+      console.error('Eval stats error:', error);
+      res.status(500).json({ error: 'Error al obtener estadísticas de evaluación' });
+    }
+  });
+
+  /**
+   * GET /api/evaluations
+   * Lista las evaluaciones más recientes para visualización.
+   */
+  router.get('/evaluations', async (req: Request, res: Response) => {
+    try {
+      const limit = Math.min(Number(req.query.limit) || 20, 100);
+      const result = await query<{
+        id: string;
+        query_text: string;
+        sources_count: number;
+        crag_decision: string | null;
+        iterations: number;
+        latency_ms: number | null;
+        faithfulness_score: number | null;
+        answer_relevance_score: number | null;
+        evaluated: boolean;
+        created_at: string;
+      }>(
+        `SELECT id, query_text, sources_count, crag_decision, iterations, latency_ms,
+                faithfulness_score, answer_relevance_score, evaluated, created_at
+         FROM query_evaluations
+         ORDER BY created_at DESC
+         LIMIT $1`,
+        [limit]
+      );
+      res.json(result.rows);
+    } catch (error) {
+      console.error('List evaluations error:', error);
+      res.status(500).json({ error: 'Error al listar evaluaciones' });
+    }
+  });
 
   /**
    * POST /api/query/relations

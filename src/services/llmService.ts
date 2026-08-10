@@ -1,4 +1,5 @@
 import OpenAI from 'openai';
+import type { ScoredChunk } from './hybridSearchService.js';
 import { env } from '../config/env.js';
 import { withRetry } from '../utils/retry.js';
 
@@ -8,10 +9,41 @@ const client = new OpenAI({
 });
 
 export class LLMService {
-  private defaultModel: string;
+  private models: string[];
 
   constructor() {
-    this.defaultModel = env.LLM_MODEL;
+    this.models = [env.LLM_MODEL, ...(env.LLM_BACKUP_MODEL ? [env.LLM_BACKUP_MODEL] : [])];
+  }
+
+  private isRateLimit(error: unknown): boolean {
+    const e = error as { status?: number; message?: string };
+    return (
+      e?.status === 429 ||
+      /429|rate limit|Too Many Requests|RateLimited/i.test(String(e?.message ?? error))
+    );
+  }
+
+  private async complete(
+    params: Omit<OpenAI.Chat.ChatCompletionCreateParams, 'model'>
+  ): Promise<OpenAI.Chat.Completions.ChatCompletion> {
+    let lastError: unknown;
+    let sawRateLimit = false;
+    for (const candidate of this.models) {
+      try {
+        const result = await client.chat.completions.create({ ...params, model: candidate });
+        return result as OpenAI.Chat.Completions.ChatCompletion;
+      } catch (error) {
+        if (!this.isRateLimit(error)) throw error;
+        lastError = error;
+        sawRateLimit = true;
+      }
+    }
+    if (sawRateLimit) {
+      console.warn(
+        `[LLM] todos los modelos rate-limited (429). Modelos: ${this.models.join(', ')}`
+      );
+    }
+    throw lastError;
   }
 
   private parseJSON<T>(content: string): T {
@@ -87,8 +119,7 @@ Devuelve ESTRICTAMENTE un JSON con el siguiente formato (NO copies el fragmento 
 }
 `;
 
-        const response = await client.chat.completions.create({
-          model: this.defaultModel,
+        const response = await this.complete({
           messages: [{ role: 'user', content: prompt }],
           response_format: { type: 'json_object' },
           temperature: 0.1,
@@ -167,8 +198,7 @@ REGLAS:
 - En "reason" indica el fragmento del contexto que apoyó tu decisión
 `;
 
-        const response = await client.chat.completions.create({
-          model: this.defaultModel,
+        const response = await this.complete({
           messages: [{ role: 'user', content: prompt }],
           response_format: { type: 'json_object' },
           temperature: 0.1,
@@ -191,17 +221,20 @@ REGLAS:
 Eres un asistente preciso y directo. Responde a la pregunta del usuario utilizando EXCLUSIVAMENTE la información provista en el CONTEXTO.
 Si la respuesta no está en el contexto, indica amablemente que no dispones de esa información.
 
-IMPORTANTE: Los fragmentos recuperados suelen contener SOLO parte de lo preguntado. No respondas "No dispongo de esa información" de forma genérica: responde con todo lo que SÍ aparece en el contexto y, si faltan datos, indícalo de forma específica (qué dato concreto falta). Si el contexto contiene algo relevante, úsalo y no lo ocultes.
+IMPORTANTE: Los fragmentos recuperados suelen contener SOLO parte de lo preguntado. No respondas "No dispongo de esa información" de forma genérica: responde con todo lo que SÍ aparece en el contexto y, si faltan datos, indícalo de forma específica.
 
-CITA LAS FUENTES: cada vez que respuestas apoye en un bloque de contexto, menciónalo citando el NOMBRE del documento con su número de fragmento, con el formato exacto del encabezado de cada bloque (por ejemplo: "(Documento Técnico de Referencia: AetherCore v4.5, fragmento 3)"). Usa el nombre de documento y el número de fragmento tal como aparecen en el tag tipo "[Fuente N - {titulo} (fragmento X)]". No te refieras a "Fuente 1" o "Fuente 2": usa siempre el título real del documento y el número de fragmento correspondiente.
+CITAS OBLIGATORIAS: Cada vez que uses información de un fragmento, debes citarlo INMEDIATAMENTE usando el siguiente formato de markdown (sin espacios):
+[[N]](frag-{id})
+Donde N es el número de la fuente (ej: 1, 2...) e {id} es el UUID que aparece después de "| id:" en el encabezado de la fuente correspondiente.
+Ejemplo: si el encabezado dice "[Fuente 2 - MiDoc (fragmento 3) | id:abc-123]", la cita es [[2]](frag-abc-123)
+NO omitas las citas. Si la información proviene de múltiples fuentes, cita todas las relevantes.
 
 --- CONTEXTO RECUPERADO ---
 ${contextText}
 ---------------------------
 `;
 
-        const response = await client.chat.completions.create({
-          model: this.defaultModel,
+        const response = await this.complete({
           messages: [
             { role: 'system', content: systemPrompt },
             { role: 'user', content: userQuery },
@@ -252,8 +285,7 @@ Devuelve ESTRICTAMENTE un JSON válido con este formato:
 CONSULTA ORIGINAL: "${userQuery}"
 `;
 
-        const response = await client.chat.completions.create({
-          model: this.defaultModel,
+        const response = await this.complete({
           messages: [{ role: 'user', content: prompt }],
           response_format: { type: 'json_object' },
           temperature: 0.1,
@@ -272,5 +304,117 @@ CONSULTA ORIGINAL: "${userQuery}"
       { maxRetries: 3, baseDelay: 2000, label: 'decompose-query' }
     );
   }
+
+  /**
+   * Cross-encoder scoring: puntúa en un único batch la relevancia de cada fragmento.
+   * Devuelve un array de scores [0-1] en el mismo orden que `chunks`.
+   */
+  async rerankChunks(userQuery: string, chunks: ScoredChunk[]): Promise<number[]> {
+    return withRetry(
+      async () => {
+        const snippets = chunks
+          .map(
+            (c, i) =>
+              `[${i}] (Documento: ${c.doc_title})\n${c.raw_content.substring(0, 400)}`
+          )
+          .join('\n\n');
+
+        const prompt = `
+Eres un evaluador de relevancia para un sistema RAG.
+Dada una consulta del usuario y una lista de fragmentos de texto numerados, asigna a cada fragmento un puntaje de relevancia entre 0.0 y 1.0.
+
+CRITERIOS:
+- 1.0 = El fragmento responde DIRECTAMENTE la consulta
+- 0.7-0.9 = El fragmento contiene información muy relevante
+- 0.4-0.6 = El fragmento es parcialmente relevante
+- 0.1-0.3 = El fragmento tiene muy poca relación
+- 0.0 = El fragmento no tiene ninguna relación
+
+CONSULTA: "${userQuery}"
+
+FRAGMENTOS:
+${snippets}
+
+Devuelve ESTRICTAMENTE un JSON con este formato (un score por fragmento, en orden):
+{
+  "scores": [0.0, 0.8, ...]
 }
+`;
+
+        const response = await this.complete({
+          messages: [{ role: 'user', content: prompt }],
+          response_format: { type: 'json_object' },
+          temperature: 0.0,
+        });
+
+        const content = response.choices[0].message.content;
+        if (!content) throw new Error('LLM returned empty response during reranking');
+
+        const parsed = this.parseJSON<{ scores: number[] }>(content);
+        const scores = Array.isArray(parsed.scores) ? parsed.scores : [];
+
+        // Asegurar que haya un score por cada chunk (rellenar con 0 si falta)
+        return chunks.map((_, i) => {
+          const s = scores[i];
+          return typeof s === 'number' && isFinite(s) ? Math.max(0, Math.min(1, s)) : 0;
+        });
+      },
+      { maxRetries: 2, baseDelay: 2000, label: 'rerank-chunks' }
+    );
+  }
+  async extractEntitiesAndRelations(documentTitle: string, chunkText: string): Promise<{
+    entities: Array<{ name: string; type: string }>;
+    relations: Array<{ source_entity: string; target_entity: string; relation_type: string }>;
+  }> {
+    return withRetry(
+      async () => {
+        const prompt = `
+Eres un asistente experto en procesamiento de lenguaje natural y modelado de grafos de conocimiento.
+Analiza el siguiente fragmento de texto perteneciente al documento "${documentTitle}" y extrae:
+1. **Entidades**: Conceptos clave, tecnologías, sistemas, personas, organizaciones o lugares.
+2. **Relaciones**: Conexiones semánticas directas entre las entidades extraídas dentro de este fragmento.
+
+FRAGMENTO:
+"${chunkText}"
+
+Devuelve ESTRICTAMENTE un JSON con el siguiente formato:
+{
+  "entities": [
+    { "name": "Nombre exacto de la entidad", "type": "Persona" | "Organización" | "Tecnología" | "Sistema" | "Concepto" | "Lugar" }
+  ],
+  "relations": [
+    { "source_entity": "Nombre exacto de la entidad origen", "target_entity": "Nombre exacto de la entidad destino", "relation_type": "verbo o relacion corta en minúscula (ej: desarrolla, implementa, es parte de, cifra)" }
+  ]
+}
+
+Reglas:
+- Sé preciso. Extrae únicamente entidades y relaciones explícitas en el texto.
+- Asegúrate de que los nombres de las entidades en "relations" coincidan exactamente con los nombres listados en "entities".
+- Si no hay entidades o relaciones claras, devuelve arrays vacíos.
+`;
+
+        const response = await this.complete({
+          messages: [{ role: 'user', content: prompt }],
+          response_format: { type: 'json_object' },
+          temperature: 0.1,
+        });
+
+        const content = response.choices[0].message.content;
+        if (!content) throw new Error('LLM returned empty response during entity extraction');
+
+        const parsed = this.parseJSON<{
+          entities: Array<{ name: string; type: string }>;
+          relations: Array<{ source_entity: string; target_entity: string; relation_type: string }>;
+        }>(content);
+
+        return {
+          entities: Array.isArray(parsed.entities) ? parsed.entities : [],
+          relations: Array.isArray(parsed.relations) ? parsed.relations : [],
+        };
+      },
+      { maxRetries: 2, baseDelay: 2000, label: 'extract-entities' }
+    );
+  }
+}
+
 

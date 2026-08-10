@@ -7,6 +7,20 @@ release/
 tessdata/
 *.traineddata
 *.traineddata.gz
+
+nueva-implementacion
+scratch/
+*.tsbuildinfo
+coverage/
+
+# Archivos de prueba / temporales no commitear
+test.txt
+test-doc.md
+test-doc.txt
+test-write.txt
+test-output.txt
 temp_*.pdf
 temp_*.txt
 temp_*
+small.txt
+large.txt

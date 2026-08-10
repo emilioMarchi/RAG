@@ -87,14 +87,14 @@ async function ingestFile(filePath: string) {
       paragraphs,
     });
 
-    console.log(`  ✓ Ingestado: ${result.docId} (${result.paragraphsProcessed} párrafos)`);
+    console.log(`  ✓ Ingestado: ${result.docId} (${result.childChunksStored} fragmentos, ${result.parentChunksStored} bloques contextuales)`);
   } catch (err) {
     console.error('Error en ingesta:', err instanceof Error ? err.message : err);
   }
 }
 
 let topDocs = 5;
-let topParagraphs = 3;
+let topParagraphs = 10;
 let iterativeMode = false;
 
 async function handleQuery(input: string) {

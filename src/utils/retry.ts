@@ -14,9 +14,10 @@ export async function withRetry<T>(
         error instanceof Error &&
         (error.message.includes('429') || error.message.includes('rate limit') || error.message.includes('Too Many Requests'));
 
-      const delay = isRateLimit
-        ? baseDelay * Math.pow(2, attempt) + Math.random() * 1000
-        : baseDelay * attempt;
+      const serverRetryAfter = isRateLimit ? extractRetryAfter(error) : 0;
+      const delay = serverRetryAfter > 0
+        ? serverRetryAfter * 1000 + Math.random() * 1000
+        : baseDelay * Math.pow(2, attempt) + Math.random() * 1000;
 
       console.warn(`[${label}] Attempt ${attempt}/${maxRetries} failed. Retrying in ${delay}ms...`);
       await new Promise(r => setTimeout(r, delay));
@@ -24,4 +25,14 @@ export async function withRetry<T>(
   }
 
   throw new Error(`[${label}] All ${maxRetries} attempts failed`);
+}
+
+function extractRetryAfter(error: Error): number {
+  const e = error as { headers?: Record<string, string>; error?: { metadata?: Record<string, unknown> } };
+  const header = e?.headers?.['retry-after'] ?? e?.headers?.['Retry-After'];
+  const meta = e?.error?.metadata?.retry_after_seconds ?? e?.error?.metadata?.retry_after_seconds_raw;
+  const candidate = header ?? meta;
+  if (candidate == null) return 0;
+  const seconds = typeof candidate === 'number' ? candidate : parseInt(String(candidate), 10);
+  return Number.isFinite(seconds) && seconds > 0 ? seconds : 0;
 }

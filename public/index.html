@@ -2,17 +2,19 @@
 <html lang="es">
 <head>
   <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta http-equiv="Content-Security-Policy" content="default-src 'self' http://localhost:3000 https://unpkg.com; script-src 'self' 'unsafe-inline' https://unpkg.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://unpkg.com; font-src https://fonts.gstatic.com">
   <title>RAG Studio</title>
+  <meta name="description" content="RAG Studio — Sistema de Retrieval-Augmented Generation con grafo semántico interactivo." />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:ital,wght@0,300;0,400;0,500;0,600;0,700;0,800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="https://unpkg.com/vis-network/styles/vis-network.min.css" />
   <link rel="stylesheet" href="style.css" />
-  <!-- Cargar Vis.js desde CDN para máxima fiabilidad web y desktop -->
   <script src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
 </head>
 <body>
-  <!-- Custom Title Bar -->
+
+  <!-- ─── Title Bar ──────────────────────────────────────────── -->
   <header class="titlebar" id="titlebar">
     <div class="titlebar-drag">
       <span class="app-icon">⬡</span>
@@ -25,39 +27,38 @@
     </div>
   </header>
 
-  <!-- Main Layout -->
+  <!-- ─── Main Layout ────────────────────────────────────────── -->
   <main class="layout">
 
     <!-- LEFT PANEL: Document Manager -->
     <aside class="panel-left" id="panel-left">
       <div class="panel-header">
-        <h2 class="panel-title">Documentos</h2>
+        <span class="panel-title">Documentos</span>
         <span class="doc-count" id="doc-count">0</span>
       </div>
 
       <!-- Upload zone -->
       <div class="upload-zone" id="upload-zone">
-        <div class="upload-icon">📄</div>
+        <div class="upload-icon">📤</div>
         <p class="upload-label">Arrastrá archivos aquí</p>
-        <p class="upload-sub">PDF · DOCX · TXT · MD</p>
+        <p class="upload-sub">PDF · DOCX · TXT · MD · XML</p>
         <button class="btn-upload" id="btn-pick-file">Seleccionar archivo</button>
       </div>
 
       <!-- Upload progress list -->
       <div class="upload-queue" id="upload-queue"></div>
 
-      <!-- Document table -->
+      <!-- Document list -->
       <div class="doc-list-wrapper">
         <div class="doc-list-header">
           <span>Archivo</span>
           <span>Tipo</span>
-          <span>Fragmentos</span>
+          <span>Frags.</span>
           <span></span>
         </div>
         <div class="doc-list" id="doc-list">
           <div class="empty-state">No hay documentos cargados aún.</div>
         </div>
-        <!-- Pagination -->
         <div class="pagination" id="pagination"></div>
       </div>
     </aside>
@@ -67,69 +68,147 @@
 
     <!-- RIGHT PANEL: Graph + Chat -->
     <section class="panel-right" id="panel-right">
+
       <!-- Tabs -->
       <div class="tab-bar">
-        <button class="tab active" data-tab="graph">Grafo de Relaciones</button>
-        <button class="tab" data-tab="chat">Chat RAG</button>
+        <button class="tab active" data-tab="graph" id="tab-btn-graph">Grafo de Relaciones</button>
+        <button class="tab" data-tab="explorer" id="tab-btn-explorer">Explorador</button>
+        <button class="tab" data-tab="chat"  id="tab-btn-chat">Chat RAG</button>
+        <button class="tab" data-tab="quality" id="tab-btn-quality">Calidad</button>
       </div>
 
-      <!-- Graph View -->
+      <!-- ── Explorer View ──────────────────────────────────────── -->
+      <div class="tab-content" id="tab-explorer">
+        <div class="explorer-wrapper">
+          <div class="explorer-header">
+            <h3>Explorador Jerárquico</h3>
+            <p class="explorer-subtitle">Navegá tus documentos y sus fragmentos</p>
+          </div>
+          <div class="explorer-tree" id="explorer-tree">
+            <!-- Rellenado dinámicamente -->
+            <div class="empty-state">No hay documentos para explorar.</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── Graph View ───────────────────────────────────────── -->
       <div class="tab-content active" id="tab-graph">
         <div class="graph-toolbar">
-          <!-- Leyenda dinámica: se llena con JS según los documentos cargados -->
+
+          <!-- Legend (filled dynamically) -->
           <div class="graph-legend" id="graph-legend">
-            <span class="legend-item-static"><span class="legend-dot" style="background:#484f58;box-shadow:none"></span>Cargando…</span>
+            <span class="legend-item-static">
+              <span class="legend-dot" style="background:var(--text-2);box-shadow:none"></span>
+              Sin documentos
+            </span>
           </div>
+
+          <!-- Semantic threshold slider -->
           <div class="graph-slider-container">
-            <label for="similarity-threshold">Umbral Semántico: <span id="threshold-val">75</span>%</label>
+            <label for="similarity-threshold">
+              Umbral:
+              <span id="threshold-val">75</span>%
+            </label>
             <input type="range" id="similarity-threshold" min="50" max="100" value="75" step="1" />
           </div>
-          <div class="graph-checkbox-container" style="display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-1); background: var(--bg-2); padding: 4px 12px; border-radius: var(--radius-sm); border: 1px solid var(--border);">
-            <input type="checkbox" id="toggle-relations" checked style="cursor: pointer;" />
-            <label for="toggle-relations" style="cursor: pointer; user-select: none; font-weight: 500; white-space: nowrap;">Ver Relaciones</label>
+
+          <!-- Toggle relations -->
+          <div class="graph-checkbox-container">
+            <input type="checkbox" id="toggle-relations" checked />
+            <label for="toggle-relations">Ver relaciones</label>
           </div>
+
+          <!-- Controls -->
           <div class="graph-controls">
             <button class="btn-icon" id="btn-clear-query" title="Limpiar búsqueda" style="display:none">✕</button>
             <button class="btn-icon" id="btn-reset-graph" title="Resetear física">⟳</button>
             <button class="btn-icon" id="btn-fit-graph" title="Ajustar vista">⊡</button>
           </div>
         </div>
+
+        <!-- Canvas -->
         <div id="graph-container"></div>
-        <div class="graph-query-bar">
-          <input type="text" id="graph-query-input" placeholder="Buscar y resaltar nodos por relevancia semántica…" autocomplete="off" />
-          <button class="btn-search" id="btn-graph-query">Buscar</button>
-        </div>
+
         <!-- Node detail panel -->
         <div class="node-detail" id="node-detail" style="display:none">
           <button class="node-detail-close" id="node-detail-close">✕</button>
           <h4 class="node-detail-title" id="node-detail-title"></h4>
           <p class="node-detail-body" id="node-detail-body"></p>
         </div>
+
+        <!-- Search bar -->
+        <div class="graph-query-bar">
+          <input
+            type="text"
+            id="graph-query-input"
+            placeholder="Buscar y resaltar nodos por relevancia semántica…"
+            autocomplete="off"
+          />
+          <button class="btn-search" id="btn-graph-query">Buscar</button>
+        </div>
       </div>
 
-      
-
-      <!-- Chat View -->
+      <!-- ── Chat View ────────────────────────────────────────── -->
       <div class="tab-content" id="tab-chat">
         <div class="chat-messages" id="chat-messages">
           <div class="chat-welcome">
             <div class="chat-welcome-icon">⬡</div>
             <h3>RAG Studio</h3>
-            <p>Hacé una pregunta sobre tus documentos.</p>
+            <p>Hacé preguntas sobre tus documentos cargados.</p>
+            <div class="chat-welcome-hints" id="chat-hints">
+              <button class="hint-chip" data-hint="¿De qué tratan los documentos cargados?">📄 ¿De qué tratan los documentos?</button>
+              <button class="hint-chip" data-hint="Resume los temas principales de la base de conocimiento.">📝 Resumen de la base de conocimiento</button>
+              <button class="hint-chip" data-hint="¿Qué información específica puedo encontrar aquí?">🔍 ¿Qué información hay disponible?</button>
+              <button class="hint-chip" data-hint="¿Cuáles son los conceptos más importantes mencionados?">💡 Conceptos más importantes</button>
+            </div>
           </div>
         </div>
-        <div class="chat-controls" style="display: flex; gap: 12px; align-items: center; padding: 8px 12px; background: var(--bg-2); border-top: 1px solid var(--border); font-size: 12px;">
-          <div style="display: flex; align-items: center; gap: 8px; flex: 1;">
-            <label for="chat-similarity-threshold" style="color: var(--text-1); white-space: nowrap;">Umbral Similitud:</label>
-            <input type="range" id="chat-similarity-threshold" min="0" max="95" value="0" step="5" style="flex: 1; max-width: 200px;" />
-            <span id="chat-threshold-val" style="width: 35px; text-align: right; color: var(--text-2);">0%</span>
-          </div>
+
+        <!-- Similarity threshold control -->
+        <div class="chat-controls">
+          <label class="chat-controls-label" for="chat-similarity-threshold">Umbral similitud:</label>
+          <input type="range" id="chat-similarity-threshold" min="0" max="95" value="0" step="5" />
+          <span class="chat-controls-val" id="chat-threshold-val">0%</span>
         </div>
+
+        <!-- Input bar -->
         <div class="chat-input-bar">
-          <textarea id="chat-input" placeholder="Escribí tu consulta…" rows="1" autocomplete="off"></textarea>
-          <button class="btn-send" id="btn-send">↑</button>
+          <textarea
+            id="chat-input"
+            placeholder="Escribí tu consulta… (Enter para enviar, Shift+Enter para nueva línea)"
+            rows="1"
+            autocomplete="off"
+          ></textarea>
+          <button class="btn-send" id="btn-send" title="Enviar (Enter)">↑</button>
         </div>
       </div>
+
+      <!-- ── Quality / Evaluation View ─────────────────────────── -->
+      <div class="tab-content" id="tab-quality">
+        <div class="quality-wrapper">
+          <div class="quality-header">
+            <h3>Evaluación de Calidad</h3>
+            <button class="btn-refresh" id="btn-refresh-quality" title="Actualizar">⟳</button>
+          </div>
+
+          <div class="quality-cards" id="quality-cards">
+            <div class="empty-state">Cargando estadísticas…</div>
+          </div>
+
+          <div class="quality-list-header">
+            <span>Consulta</span>
+            <span>Fidelidad</span>
+            <span>Relevancia</span>
+            <span>CRAG</span>
+            <span>Latencia</span>
+            <span>Fecha</span>
+          </div>
+          <div class="quality-list" id="quality-list">
+            <div class="empty-state">No hay evaluaciones registradas aún.</div>
+          </div>
+        </div>
+      </div>
+
     </section>
   </main>
 

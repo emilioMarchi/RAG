@@ -194,10 +194,14 @@ btnPickFile.addEventListener('click', async () => {
   } else {
     const input = document.createElement('input');
     input.type = 'file';
-    input.accept = '.pdf,.docx,.txt,.md';
+    input.accept = '.pdf,.docx,.txt,.md,.xml';
     input.multiple = true;
+    input.style.display = 'none';
+    document.body.appendChild(input);
     input.onchange = async () => {
-      for (const file of Array.from(input.files)) await uploadFile(file);
+      const files = Array.from(input.files || []);
+      input.remove();
+      for (const file of files) await uploadFile(file);
     };
     input.click();
   }
@@ -283,8 +287,9 @@ async function initGraph() {
       },
       // La física queda activa tras estabilizar para que los nodos se puedan
       // arrastrar de forma elástica (moviendo el clúster conectado). La velocidad
-      // mínima alta evita que siga orbitando indefinidamente.
-      minVelocity: 0.75,
+      // mínima alta hace que los nodos se detengan una vez asentados, evitando
+      // que sigan orbitando indefinidamente y que sea difícil clickearlos.
+      minVelocity: 4,
       maxVelocity: 50,
       timestep: 0.5,
       wind: { x: 0, y: 0 },
@@ -549,11 +554,84 @@ async function updateSemanticRelations() {
     semanticRelations = relations;
 
     if (relations.length > 0) {
-      network.stabilize(100);
+      // Asentamos con más iteraciones para absorber el "golpe" al agregar
+      // muchas aristas semánticas y dejar los nodos quietos (clicables).
+      network.stabilize(250);
     }
   } catch (err) {
     console.error('Error al actualizar las relaciones semánticas:', err);
+  } finally {
+    renderExplorer();
   }
+}
+
+function renderExplorer() {
+  const explorerTree = document.getElementById('explorer-tree');
+  if (!explorerTree) return;
+
+  if (documents.length === 0) {
+    explorerTree.innerHTML = '<div class="empty-state">No hay documentos para explorar.</div>';
+    return;
+  }
+
+  let html = '';
+  
+  // Group paragraphs by document_id
+  const parasByDoc = {};
+  allParagraphs.forEach(p => {
+    if (!parasByDoc[p.document_id]) parasByDoc[p.document_id] = [];
+    parasByDoc[p.document_id].push(p);
+  });
+
+  documents.forEach(doc => {
+    const ext = (doc.mime_type || '').split('/').pop()?.split('.').pop() || '?';
+    const paras = parasByDoc[doc.id] || [];
+    
+    html += `
+      <div class="explorer-doc-card collapsed">
+        <div class="explorer-doc-title" onclick="this.parentElement.classList.toggle('collapsed')">
+          <div class="explorer-doc-title-left">
+            <span class="explorer-doc-arrow">▼</span>
+            ${doc.title}
+          </div>
+          <span class="explorer-doc-badge">${ext.toUpperCase()}</span>
+        </div>
+        <div class="explorer-doc-content">
+          ${paras.map((p, idx) => {
+            // Find relations involving this paragraph
+            const relations = semanticRelations.filter(r => r.source_id === p.id || r.target_id === p.id);
+            
+            let relationsHtml = '';
+            relations.forEach(r => {
+              const isSource = r.source_id === p.id;
+              const relatedId = isSource ? r.target_id : r.source_id;
+              const similarity = (r.similarity * 100).toFixed(1);
+              const highClass = r.similarity > 0.82 ? ' high' : '';
+              
+              relationsHtml += `
+                <span class="badge-relation badge-semantic${highClass}" onclick="window.focusNodeInGraph('frag-${relatedId}')" title="Ir al nodo relacionado">
+                  ${isSource ? '→' : '←'} Semántico (${similarity}%)
+                </span>
+              `;
+            });
+
+            return `
+              <div class="explorer-frag-row">
+                <div class="explorer-frag-header">
+                  <span class="explorer-frag-index">Fragmento ${p.paragraph_index + 1}</span>
+                  <button class="badge-relation badge-seq" onclick="window.focusNodeInGraph('frag-${p.id}')" title="Ver en grafo">Ver Nodo</button>
+                </div>
+                <div class="explorer-frag-text">${p.raw_content}</div>
+                ${relationsHtml ? `<div class="explorer-relations-section">${relationsHtml}</div>` : ''}
+              </div>
+            `;
+          }).join('')}
+        </div>
+      </div>
+    `;
+  });
+
+  explorerTree.innerHTML = html;
 }
 
 // Expone globalmente para los clics en los badges del explorador
@@ -778,6 +856,18 @@ btnSend.addEventListener('click', sendChat);
 chatInput.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChat(); }
 });
+
+const chatMsgsContainer = document.getElementById('chat-messages');
+if (chatMsgsContainer) {
+  chatMsgsContainer.addEventListener('click', (e) => {
+    const hint = e.target.closest('.hint-chip');
+    if (hint) {
+      chatInput.value = hint.dataset.hint;
+      sendChat();
+    }
+  });
+}
+
 chatInput.addEventListener('input', () => {
   chatInput.style.height = 'auto';
   chatInput.style.height = Math.min(chatInput.scrollHeight, 140) + 'px';
@@ -812,10 +902,10 @@ async function sendChat() {
     const result = await api('/api/query/iterative', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query: q, topDocs: 5, topParagraphs: 4, similarityThreshold: threshold }),
+      body: JSON.stringify({ query: q, topDocs: 5, topParagraphs: 10, similarityThreshold: threshold }),
     });
 
-    loadingEl.querySelector('.chat-bubble').textContent = result.answer;
+    loadingEl.querySelector('.chat-bubble').innerHTML = renderAnswer(result.answer, buildCitationLabels(result.sources));
     loadingEl.querySelector('.chat-bubble').classList.remove('loading');
 
     if (result.iterations !== undefined) {
@@ -844,14 +934,111 @@ async function sendChat() {
   }
 }
 
+function buildCitationLabels(sources) {
+  const map = {};
+  (sources || []).forEach(s => {
+    if (!s.id) return;
+    map[`frag-${s.id}`] = `${s.doc_title} · frag. ${(s.paragraph_index ?? 0) + 1}`;
+  });
+  return map;
+}
+
+function renderAnswer(text, labels = {}) {
+  // Convierte [[N]](frag-UUID) en botones clickeables que enfocan el nodo en el grafo.
+  // El texto mostrado es "nombre de archivo · fragmento N" (con fallback a "Fuente N").
+  return text.replace(
+    /\[\[(\d+)\]\]\(frag-([a-f0-9-]+)\)/g,
+    (_, n, uuid) => {
+      const key = `frag-${uuid}`;
+      const label = labels[key] || `Fuente ${n}`;
+      return `<button class="citation-chip" onclick="window.focusNodeInGraph('${key}')" title="${key}">
+        <span class="citation-num">${n}</span>
+        <span class="citation-label">${label}</span>
+      </button>`;
+    }
+  );
+}
+
 function appendMsg(role, text, loading = false) {
   const div = document.createElement('div');
   div.className = `chat-msg ${role}`;
-  div.innerHTML = `<div class="chat-bubble${loading ? ' loading' : ''}">${text}</div>`;
+  const bubble = document.createElement('div');
+  bubble.className = `chat-bubble${loading ? ' loading' : ''}`;
+  if (loading) {
+    bubble.textContent = text;
+  } else {
+    bubble.innerHTML = renderAnswer(text);
+  }
+  div.appendChild(bubble);
   chatMsgs.appendChild(div);
   chatMsgs.scrollTop = chatMsgs.scrollHeight;
   return div;
 }
+
+
+// ─── Quality / Evaluation ──────────────────────────────────────────────────────
+const qualityCards = document.getElementById('quality-cards');
+const qualityList = document.getElementById('quality-list');
+const btnRefreshQuality = document.getElementById('btn-refresh-quality');
+
+function scoreBadge(label, val) {
+  if (val == null) return `<span class="quality-empty">—</span>`;
+  const pct = Math.round(val * 100);
+  const cls = val >= 0.8 ? ' good' : val >= 0.6 ? ' mid' : ' bad';
+  return `<span class="quality-score${cls}">${label}: ${pct}%</span>`;
+}
+
+function decisionBadge(decision) {
+  const map = { RELEVANT: 'good', PARTIAL: 'fair', IRRELEVANT: 'bad' };
+  return `<span class="quality-score ${map[decision] || ''}">${decision || '—'}</span>`;
+}
+
+async function loadQuality() {
+  if (!qualityCards || !qualityList) return;
+  try {
+    const [stats, list] = await Promise.all([
+      api('/api/evaluations/stats'),
+      api('/api/evaluations?limit=50'),
+    ]);
+
+    const cards = [
+      { label: 'Consultas', value: stats.total, cls: '' },
+      { label: 'Evaluadas', value: stats.evaluated, cls: stats.evaluated > 0 ? 'good' : '' },
+      { label: 'Fidelidad prom.', value: stats.avg_faithfulness != null ? Math.round(stats.avg_faithfulness * 100) + '%' : '—', cls: stats.avg_faithfulness >= 0.8 ? 'good' : stats.avg_faithfulness != null && stats.avg_faithfulness >= 0.6 ? 'fair' : '' },
+      { label: 'Relevancia prom.', value: stats.avg_relevance != null ? Math.round(stats.avg_relevance * 100) + '%' : '—', cls: stats.avg_relevance >= 0.8 ? 'good' : stats.avg_relevance != null && stats.avg_relevance >= 0.6 ? 'fair' : '' },
+      { label: 'Latencia prom.', value: stats.avg_latency_ms != null ? stats.avg_latency_ms + ' ms' : '—', cls: '' },
+      { label: 'Iteraciones prom.', value: stats.avg_iterations != null ? stats.avg_iterations : '—', cls: '' },
+    ];
+
+    qualityCards.innerHTML = cards.map(c =>
+      `<div class="quality-card${c.cls ? ` ${c.cls}` : ''}">
+         <div class="quality-card-value">${c.value}</div>
+         <div class="quality-card-label">${c.label}</div>
+       </div>`
+    ).join('');
+
+    if (list.length === 0) {
+      qualityList.innerHTML = '<div class="empty-state">No hay evaluaciones registradas aún.</div>';
+      return;
+    }
+
+    qualityList.innerHTML = list.map(e => `
+      <div class="quality-row">
+        <span class="quality-query" title="${e.query_text}">${e.query_text}</span>
+        <span>${scoreBadge('', e.faithfulness_score)}</span>
+        <span>${scoreBadge('', e.answer_relevance_score)}</span>
+        <span>${decisionBadge(e.crag_decision)}</span>
+        <span>${e.latency_ms != null ? e.latency_ms + ' ms' : '—'}</span>
+        <span class="quality-date">${new Date(e.created_at).toLocaleString()}</span>
+      </div>`).join('');
+  } catch (e) {
+    if (qualityCards) qualityCards.innerHTML = '<div class="empty-state">Error cargando estadísticas: ' + e.message + '</div>';
+  }
+}
+
+if (btnRefreshQuality) btnRefreshQuality.addEventListener('click', loadQuality);
+const qualityTabBtn = document.getElementById('tab-btn-quality');
+if (qualityTabBtn) qualityTabBtn.addEventListener('click', () => loadQuality());
 
 // ─── Boot ─────────────────────────────────────────────────────────────────────
 (async () => {

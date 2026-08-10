@@ -17,6 +17,29 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const TESSDATA_DIR = path.resolve(__dirname, '..', '..', 'tessdata');
 
+export interface ChildChunk {
+  text: string;
+  /** Índice del chunk hijo dentro del documento */
+  childIndex: number;
+  /** Índice del parent chunk al que pertenece este hijo */
+  parentIndex: number;
+}
+
+export interface ParentChunk {
+  text: string;
+  /** Índice del parent chunk dentro del documento */
+  parentIndex: number;
+  /** Índice del primer child que pertenece a este parent */
+  startChildIndex: number;
+  /** Índice del último child que pertenece a este parent */
+  endChildIndex: number;
+}
+
+export interface HierarchicalChunks {
+  parents: ParentChunk[];
+  children: ChildChunk[];
+}
+
 export class ChunkingService {
   async extractText(filePath: string, mimeType: string): Promise<string> {
     const ext = path.extname(filePath).toLowerCase();
@@ -32,6 +55,9 @@ export class ChunkingService {
     }
     if (mimeType === 'text/markdown' || ext === '.md') {
       return this.extractTXT(filePath);
+    }
+    if (mimeType === 'application/xml' || mimeType === 'text/xml' || ext === '.xml') {
+      return this.extractXML(filePath);
     }
 
     throw new Error(`Unsupported file type: ${mimeType} (${ext})`);
@@ -190,5 +216,118 @@ export class ChunkingService {
 
   private async extractTXT(filePath: string): Promise<string> {
     return fs.readFileSync(filePath, 'utf-8');
+  }
+
+  /**
+   * Extrae el texto de un documento XML: elimina comentarios, CDATA, doctype y
+   * las etiquetas, conservando el contenido textual como párrafos.
+   */
+  private async extractXML(filePath: string): Promise<string> {
+    const raw = fs.readFileSync(filePath, 'utf-8')
+      .replace(/<\?xml[^>]*\?>/g, '')
+      .replace(/<!\[CDATA\[/g, '')
+      .replace(/\]\]>/g, '')
+      .replace(/<!--[\s\S]*?-->/g, '')
+      .replace(/<!DOCTYPE[\s\S]*?>/gi, '');
+
+    return raw
+      .split(/>\s*</)
+      .map(seg => seg.replace(/<\/?[^>]+>/g, '').trim())
+      .filter(seg => seg.length > 0)
+      .join('\n');
+  }
+
+  /**
+   * Divide el texto en una estructura jerárquica Parent-Child:
+   * - Parent chunks: bloques de 1200-2000 chars (contexto completo para el LLM)
+   * - Child chunks: sub-fragmentos de 300-500 chars por parent (optimizados para embedding)
+   *
+   * La relación parent→child se registra mediante índices para facilitar el almacenamiento.
+   */
+  splitHierarchical(
+    text: string,
+    mimeType: string = '',
+    options: { parentMaxChars?: number; childMaxChars?: number; childMinChars?: number } = {}
+  ): HierarchicalChunks {
+    const { parentMaxChars = 1800, childMaxChars = 450, childMinChars = 80 } = options;
+
+    // 1. Obtener parent chunks: bloques grandes
+    const parentTexts = this.splitBySize(text, parentMaxChars, mimeType);
+
+    const parents: ParentChunk[] = [];
+    const children: ChildChunk[] = [];
+    let globalChildIndex = 0;
+
+    parentTexts.forEach((parentText, parentIndex) => {
+      const startChildIndex = globalChildIndex;
+
+      // 2. Dividir cada parent en children más pequeños
+      const childTexts = this.splitBySize(parentText, childMaxChars)
+        .filter(t => t.length >= childMinChars);
+
+      for (const childText of childTexts) {
+        children.push({
+          text: childText,
+          childIndex: globalChildIndex,
+          parentIndex,
+        });
+        globalChildIndex++;
+      }
+
+      const endChildIndex = globalChildIndex - 1;
+
+      parents.push({
+        text: parentText,
+        parentIndex,
+        startChildIndex,
+        endChildIndex: endChildIndex >= startChildIndex ? endChildIndex : startChildIndex,
+      });
+    });
+
+    return { parents, children };
+  }
+
+  /**
+   * Divide texto en fragmentos de tamaño máximo `maxChars`.
+   * Intenta cortar en líneas en blanco o saltos de línea para preservar párrafos.
+   */
+  private splitBySize(text: string, maxChars: number, mimeType?: string): string[] {
+    // Para PDFs usamos el splitter especializado y luego agrupamos hasta maxChars
+    if (mimeType && this.isPDF(mimeType)) {
+      const pdfFragments = this.splitPDF(text);
+      return this.groupFragments(pdfFragments, maxChars);
+    }
+
+    const paragraphs = text.split(/\n\s*\n/).map(p => p.trim()).filter(p => p.length > 0);
+    return this.groupFragments(paragraphs, maxChars);
+  }
+
+  /**
+   * Agrupa una lista de fragmentos en bloques de hasta `maxChars` caracteres.
+   */
+  private groupFragments(fragments: string[], maxChars: number): string[] {
+    const blocks: string[] = [];
+    let current: string[] = [];
+    let currentLen = 0;
+
+    for (const frag of fragments) {
+      if (currentLen + frag.length > maxChars && current.length > 0) {
+        blocks.push(current.join('\n\n').trim());
+        current = [];
+        currentLen = 0;
+      }
+      // Si un solo fragmento es mayor que maxChars, lo corta duro
+      if (frag.length > maxChars) {
+        for (let i = 0; i < frag.length; i += maxChars) {
+          blocks.push(frag.slice(i, i + maxChars).trim());
+        }
+      } else {
+        current.push(frag);
+        currentLen += frag.length;
+      }
+    }
+
+    if (current.length > 0) blocks.push(current.join('\n\n').trim());
+    return blocks.filter(b => b.length > 0);
   }
 }

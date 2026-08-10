@@ -19,6 +19,7 @@ export const env = {
   LLM_API_URL: process.env.LLM_API_URL || 'https://openrouter.ai/api/v1',
   LLM_API_KEY: required('LLM_API_KEY'),
   LLM_MODEL: process.env.LLM_MODEL || 'meta-llama/llama-3.3-70b-instruct:free',
+  LLM_BACKUP_MODEL: optional('LLM_BACKUP_MODEL'),
   DATABASE_URL: required('DATABASE_URL'),
 
   // Almacenamiento: 'local' (default) o 'r2'

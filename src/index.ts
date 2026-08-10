@@ -35,7 +35,7 @@ const rag = new HierarchicalRAGModule(embedder, llm);
 const iterativeRag = new IterativeRAGEngine(embedder, llm);
 
 app.use('/api', createDocumentRouter(pipeline, chunker, storage));
-app.use('/api', createQueryRouter(rag, iterativeRag));
+app.use('/api', createQueryRouter(rag, iterativeRag, llm));
 
 app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });

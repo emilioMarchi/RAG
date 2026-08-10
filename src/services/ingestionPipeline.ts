@@ -112,13 +112,13 @@ export class IngestionPipeline {
         // Persistir Entidades encontradas en el fragmento
         const entityMap = new Map<string, string>();
         for (const ent of ec.graphData.entities) {
-          const key = ent.name.toLowerCase().trim();
+          const key = (ent.name ?? '').toLowerCase().trim();
           if (!key) continue;
 
           const entRes = await client.query(
             `INSERT INTO document_entities (document_id, paragraph_id, entity_name, entity_type)
              VALUES ($1, $2, $3, $4) RETURNING id`,
-            [docId, paragraphId, ent.name, ent.type]
+            [docId, paragraphId, ent.name, ent.type ?? 'entity']
           );
           entityMap.set(key, entRes.rows[0].id);
         }
@@ -135,7 +135,7 @@ export class IngestionPipeline {
             await client.query(
               `INSERT INTO entity_relations (source_entity_id, target_entity_id, relation_type, context_paragraph_id)
                VALUES ($1, $2, $3, $4)`,
-              [sourceId, targetId, rel.relation_type, paragraphId]
+              [sourceId, targetId, rel.relation_type ?? '', paragraphId]
             );
           }
         }

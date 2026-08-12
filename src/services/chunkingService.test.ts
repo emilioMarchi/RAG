@@ -89,6 +89,49 @@ describe('splitHierarchical location', () => {
   })
 })
 
+describe('splitStructural', () => {
+  it('no parte dentro de un ARTÍCULO: corta en las fronteras de numeración', () => {
+    const c2 = new ChunkingService()
+    const text = [
+      'ARTÍCULO 1. - Cuerpo del primer artículo con contenido suficiente para el ejemplo.',
+      'ARTÍCULO 2. - Segundo artículo que también debe respetarse como bloque individual.',
+      'ARTÍCULO 3. - Tercer artículo con algo de texto adicional.',
+    ].join('\n')
+    const slices = c2.splitStructural(text, 2000)
+    expect(slices.length).toBeGreaterThan(0)
+    for (const s of slices) {
+      expect(s.text.length).toBeLessThanOrEqual(2000)
+      // Un artículo no debe qjuntarse con el anterior sin respetar su frontera cuando el bloque cabe.
+      expect(/^ARTÍCULO \d/.test(s.text.trim())).toBe(true)
+    }
+  })
+
+  it('divide en múltiples slices cuando el texto excede maxChars', () => {
+    const c2 = new ChunkingService()
+    const text = ['# Título', 'ARTÍCULO 1.', 'palabra valiosa '.repeat(50), 'ARTÍCULO 2.', 'palabra valiosa '.repeat(50)].join('\n')
+    const slices = c2.splitStructural(text, 200)
+    expect(slices.length).toBeGreaterThan(1)
+    for (const s of slices) expect(s.text.length).toBeLessThanOrEqual(200)
+  })
+
+  it('preserva offsets correctos sobre el texto de entrada', () => {
+    const c2 = new ChunkingService()
+    const text = '# Título\n\nARTÍCULO 1. Inicio.\n\nARTÍCULO 2. Siguiente.'
+    const slices = c2.splitStructural(text, 2000)
+    for (const s of slices) {
+      expect(text.slice(s.start, s.end)).toBe(s.text)
+    }
+  })
+
+  it('cae a corte por oración para bloques sin fronteras que exceden el tope', () => {
+    const c2 = new ChunkingService()
+    const text = 'UNSOLOARTICULOSINFONTERAS'.repeat(50) // texto corrido: no hay \n ni marcadores
+    const slices = c2.splitStructural(text, 100)
+    expect(slices.length).toBeGreaterThan(1)
+    for (const s of slices) expect(s.text.length).toBeLessThanOrEqual(100)
+  })
+})
+
 describe('splitIntoParagraphs', () => {
   it('split by double newlines', () => {
     const r = c.splitIntoParagraphs('First paragraph is long enough.\n\nSecond paragraph also long enough.\n\nThird long paragraph.')

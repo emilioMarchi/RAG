@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { detectBoundaries } from './chunking/boundaryDetector.js';
 
 interface PdfTextItemLike {
   str?: string;
@@ -591,8 +592,82 @@ export class ChunkingService {
       return slices;
     }
 
-    const blocks = this.splitByBlankLines(text);
-    return this.groupBlocks(blocks, maxChars);
+    const blocks = this.splitStructural(text, maxChars);
+    return blocks;
+  }
+
+  /**
+   * Split estructural (Fase 2 del plan): en vez de cortar a tope de `maxChars`,
+   * parte en las fronteras detectadas (`detectBoundaries`) acumulando bloques hasta
+   * el límite. Si un único bloque (p. ej. un ARTÍCULO gigante) supera `maxChars`,
+   * cae al corte por oración de `sliceOversized`. Mantiene `{ text, start, end }`
+   * para no romper la firma que consume `splitSlices()`/`splitHierarchical()`.
+   */
+  public splitStructural(
+    text: string,
+    maxChars: number,
+    opts: { minChars?: number } = {}
+  ): Array<{ text: string; start: number; end: number }> {
+    const minChars = opts.minChars ?? 1;
+    const segments = this.sliceByBoundaries(text, detectBoundaries(text));
+
+    const out: Array<{ text: string; start: number; end: number }> = [];
+    let buffer: Array<{ text: string; start: number; end: number }> = [];
+    let bufferLen = 0;
+
+    const flush = () => {
+      if (buffer.length === 0) return;
+      out.push({
+        text: buffer.map(s => s.text).join(PAGE_SEP),
+        start: buffer[0].start,
+        end: buffer[buffer.length - 1].end,
+      });
+      buffer = [];
+      bufferLen = 0;
+    };
+
+    for (const seg of segments) {
+      // Bloque único que excede el tope → fallback a cortes por oración/línea.
+      if (seg.text.length > maxChars) {
+        flush();
+        for (const piece of this.sliceOversized(seg.text, maxChars)) {
+          out.push({ text: piece.text, start: seg.start + piece.start, end: seg.start + piece.end });
+        }
+        continue;
+      }
+
+      const sepLen = buffer.length > 0 ? PAGE_SEP.length : 0;
+      if (buffer.length > 0 && bufferLen + sepLen + seg.text.length > maxChars) flush();
+      buffer.push(seg);
+      bufferLen += bufferLen === 0 ? seg.text.length : sepLen + seg.text.length;
+    }
+    flush();
+
+    return out.filter(s => s.text.trim().length >= minChars);
+  }
+
+  /** Parte el texto en segmentos, cada uno desde una frontera hasta la siguiente. */
+  private sliceByBoundaries(
+    text: string,
+    boundaries: Array<{ start: number }>
+  ): Array<{ text: string; start: number; end: number }> {
+    const cuts = Array.from(new Set([0, ...boundaries.map(b => b.start)])).sort((a, b) => a - b);
+    const segs: Array<{ text: string; start: number; end: number }> = [];
+
+    const pushSeg = (start: number, end: number) => {
+      if (start >= end) return;
+      const raw = text.slice(start, end);
+      const ns = raw.search(/\S/);
+      const ne = raw.search(/\s*$/);
+      if (ns < 0 || ne <= ns) return;
+      const trimmed = raw.slice(ns, ne);
+      segs.push({ text: trimmed, start: start + ns, end: start + ne });
+    };
+
+    for (let i = 0; i < cuts.length - 1; i++) pushSeg(cuts[i], cuts[i + 1]);
+    const tail = cuts[cuts.length - 1];
+    if (tail < text.length) pushSeg(tail, text.length);
+    return segs;
   }
 
   /** Divide por líneas en blanco devolviendo párrafos junto a sus offsets originales. */

@@ -35,6 +35,7 @@
     "migrate": "tsx src/migrate.ts",
     "test": "vitest run",
     "test:watch": "vitest",
+    "eval:chunking": "tsx src/evaluateChunking.ts",
     "console": "tsx src/console.ts",
     "electron": "npm run build && electron electron/main.js",
     "electron:dev": "cross-env ELECTRON_DEV=1 electron electron/main.js",

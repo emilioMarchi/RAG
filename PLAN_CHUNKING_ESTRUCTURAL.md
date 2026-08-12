@@ -26,7 +26,7 @@ graph TD
     F3 --> F5[Fase 5: Rango core vs extended ✅]
     F4 --> F6[Fase 6: Contexto normativo (AST) ✅]
     F5 --> F7[Fase 7: Hook adaptativo por densidad ✅]
-    F6 --> F8[Fase 8: Evaluacion empirica ⏳]
+    F6 --> F8[Fase 8: Evaluacion empirica ✅]
 ```
 
 ---
@@ -230,7 +230,7 @@ Para no duplicar lógica por estrategia, exponer un `sizeFor(segment)` opcional 
 
 ---
 
-## Fase 8 — Evaluación empírica ⏳ pendiente
+## Fase 8 — Evaluación empírica ✅
 
 La partición óptima se mide, no se asume:
 - Métrica de recuperación (recall@k de `hybridSearchService`) con y sin cada cambio (baseline fijo vs. estructural vs. overlap vs. adaptativo).
@@ -248,6 +248,7 @@ La partición óptima se mide, no se asume:
 - [ ] Backward-compat: sin cambiar configs, la salida es equivalente a la actual (salvo el corte en fronteras).
 - [ ] Tests unitarios de `detectBoundaries`, `splitStructural`, overlap y adaptativo; suite del repo en verde salvo las 4 fallas preexistentes de mocks DB.
 - [ ] (F7) `sizeFor` permite partición adaptativa por densidad sin regresión al omitirlo. ✅
+- [ ] (F8) `npm run eval:chunking` compara configs y estrategias con métricas de adhesión a fronteras. ✅
 - [ ] (F0) PDF sin headers/footers intermedios rompiendo las fronteras. ✅
 - [ ] (F5) `location` diferencia `core` vs `extended`; el visor usa `core` por defecto. ✅
 - [ ] (F6) cada child de normativa es enriquecido con su encabezado jerárquico (AST). ✅
@@ -264,7 +265,7 @@ La partición óptima se mide, no se asume:
 - **Re-ingesta**: los documentos ya subidos no tienen `location`; el split estructural no los arregla de forma retroactiva (re-ingest).
 - **Orden**: fronteras primero (F0-2), luego overlap (F3) y parent-child+dedup (F4), luego rango core (F5), contexto normativo (F6); adaptativo (F7) y evaluación (F8) pueden ir después, sin bloquear las anteriores.
 
-_Nota: Fase 0 a 7 implementadas. La fase 8 (evaluación empírica) es el desarrollo pendiente restante de este único plan._
+_Nota: todas las fases (0 a 8) están implementadas en este único plan._
 
 
 🚀 Hoja de Ruta de Ejecución Inmediata (orden único integrado — Sprint 1 a 3 ✅ completos)

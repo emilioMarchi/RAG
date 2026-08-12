@@ -89,6 +89,8 @@ export interface ChildChunk {
   parentIndex: number;
   /** Ubicación del fragmento dentro del documento original */
   location?: ChunkLocation;
+  /** Fase 6: header jerárquico normativo (ej. "LEY 27.541 > TITULO II > ARTICULO 14"). */
+  contextPath?: string;
 }
 
 export interface ParentChunk {

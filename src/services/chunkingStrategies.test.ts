@@ -147,4 +147,25 @@ describe('splitWithStrategy', () => {
     const coreSlice = text.slice(loc!.coreStartChar!, loc!.coreEndChar!)
     expect(b.text.endsWith(coreSlice)).toBe(true)
   })
+
+  it('ancla un contextPath normativo jerárquico en la estrategia legal (Fase 6)', () => {
+    const legal = new LegalNormChunkingStrategy()
+    // ARTICULO 14 largo para forzar que ARTICULO 15 quede en un child propio.
+    const law = [
+      'LEY 27.541 - PRESUPUESTO.',
+      'TITULO II - REGIMEN FISCAL.',
+      'ARTICULO 14. - ' + 'contenido impositivo extenso y detallado del regimen '.repeat(40),
+      'ARTICULO 15. - Facultades de la autoridad para la fiscalización.',
+    ].join('\n\n')
+    const { children } = splitWithStrategy(c, law, legal, { childMinChars: 1 })
+    const withAtr15 = children.find(ch => ch.contextPath?.includes('ARTICULO 15'))
+    expect(withAtr15).toBeDefined()
+    expect(withAtr15!.contextPath).toContain('LEY 27.541')
+    expect(withAtr15!.contextPath).toContain('TITULO II')
+    expect(withAtr15!.contextPath).toContain('ARTICULO 15')
+    // La estrategia genérica no genera contextPath
+    const generic = new GenericChunkingStrategy()
+    const g = splitWithStrategy(c, law, generic, { childMinChars: 1 })
+    expect(g.children.some(ch => ch.contextPath)).toBe(false)
+  })
 })

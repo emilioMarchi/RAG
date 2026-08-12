@@ -80,7 +80,9 @@ export class IngestionPipeline {
       const enrichedChildren = await mapConcurrent(
         children,
         async (child) => {
-          const enriched = await this.llm.enrichChunk(title, docSummary, child.text);
+          // Fase 6 — anteponer el header jerárquico normativo al texto antes de enriquecer
+          const enhancedText = child.contextPath ? `${child.contextPath}\n${child.text}` : child.text;
+          const enriched = await this.llm.enrichChunk(title, docSummary, enhancedText);
           const ctxText = enriched.contextualized_text || child.text;
           const highVector = await this.embedder.generateEmbedding(ctxText, 1536);
           

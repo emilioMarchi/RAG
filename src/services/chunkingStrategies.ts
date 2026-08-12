@@ -1,5 +1,6 @@
 import { ChunkingService, PdfPage } from './chunkingService.js';
 import { StrategyDetector } from './strategyDetector.js';
+import { normativeOutline, outlinePathAt } from './chunking/normativeContext.js';
 
 export type ChunkingStrategyName = 'generic' | 'legal';
 
@@ -239,9 +240,15 @@ export function splitWithStrategy(
     childMinChars: opts.childMinChars ?? strategy.config.childMinChars,
   });
 
+  // Fase 6 — Contexto normativo: para la estrategia legal, reconstruir el outline
+  // jerárquico y anclar cada child a su cadena de ancestros (sobre texto preparado).
+  const outline = strategy.config.name === 'legal' ? normativeOutline(prepared.text) : [];
+
   const children = result.children.map(ch => {
     const loc = ch.location;
     if (!loc || loc.startChar == null || loc.endChar == null) return ch;
+
+    const contextPath = outline.length > 0 ? outlinePathAt(outline, loc.startChar) : undefined;
 
     // Fase 3 — Overlap: retroceder el inicio del child sobre el texto preparado
     // para incluir la cola del chunk anterior, sin perder contexto en el corte.
@@ -266,6 +273,7 @@ export function splitWithStrategy(
       ...ch,
       text: textWithOverlap,
       location: located,
+      ...(contextPath ? { contextPath } : {}),
     };
   });
 

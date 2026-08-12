@@ -25,7 +25,7 @@ graph TD
     F2 --> F4[Fase 4: Parent-child + dedup grafo ✅]
     F3 --> F5[Fase 5: Rango core vs extended ✅]
     F4 --> F6[Fase 6: Contexto normativo (AST) ✅]
-    F5 --> F7[Fase 7: Hook adaptativo por densidad ⏳]
+    F5 --> F7[Fase 7: Hook adaptativo por densidad ✅]
     F6 --> F8[Fase 8: Evaluacion empirica ⏳]
 ```
 
@@ -220,7 +220,7 @@ qué ARTÍCULO/Capítulo pertenece si ese contexto no se propaga.
 
 ---
 
-## Fase 7 — Hook adaptativo por densidad ⏳ pendiente (opcional)
+## Fase 7 — Hook adaptativo por densidad ✅ (opcional)
 
 Para no duplicar lógica por estrategia, exponer un `sizeFor(segment)` opcional en `ChunkingStrategyConfig`:
 
@@ -247,6 +247,7 @@ La partición óptima se mide, no se asume:
 - [ ] `location` sigue calculándose sobre el **texto original** y no desalinea el visor (mantener `locateOnOriginal`).
 - [ ] Backward-compat: sin cambiar configs, la salida es equivalente a la actual (salvo el corte en fronteras).
 - [ ] Tests unitarios de `detectBoundaries`, `splitStructural`, overlap y adaptativo; suite del repo en verde salvo las 4 fallas preexistentes de mocks DB.
+- [ ] (F7) `sizeFor` permite partición adaptativa por densidad sin regresión al omitirlo. ✅
 - [ ] (F0) PDF sin headers/footers intermedios rompiendo las fronteras. ✅
 - [ ] (F5) `location` diferencia `core` vs `extended`; el visor usa `core` por defecto. ✅
 - [ ] (F6) cada child de normativa es enriquecido con su encabezado jerárquico (AST). ✅
@@ -263,7 +264,7 @@ La partición óptima se mide, no se asume:
 - **Re-ingesta**: los documentos ya subidos no tienen `location`; el split estructural no los arregla de forma retroactiva (re-ingest).
 - **Orden**: fronteras primero (F0-2), luego overlap (F3) y parent-child+dedup (F4), luego rango core (F5), contexto normativo (F6); adaptativo (F7) y evaluación (F8) pueden ir después, sin bloquear las anteriores.
 
-_Nota: Fase 0 a 6 implementadas. Las fases 7 (adaptativo, opcional) y 8 (evaluación) son el desarrollo pendiente restante de este único plan._
+_Nota: Fase 0 a 7 implementadas. La fase 8 (evaluación empírica) es el desarrollo pendiente restante de este único plan._
 
 
 🚀 Hoja de Ruta de Ejecución Inmediata (orden único integrado — Sprint 1 a 3 ✅ completos)

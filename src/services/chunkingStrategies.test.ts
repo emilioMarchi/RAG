@@ -168,4 +168,17 @@ describe('splitWithStrategy', () => {
     const g = splitWithStrategy(c, law, generic, { childMinChars: 1 })
     expect(g.children.some(ch => ch.contextPath)).toBe(false)
   })
+
+  it('respeta el hook adaptativo sizeFor por segmento (Fase 7)', () => {
+    const generic = new GenericChunkingStrategy()
+    // texto con párrafos alternos que el detector parte en segmentos
+    const text = Array.from({ length: 20 }, (_, i) => `Párrafo ${i} de contenido suficientemente extenso para cortar.`).join('\n\n')
+
+    // sizeFor estricto: cada segmento de 6 chars de máx → fuerza muchos chunks pequeños
+    const strict = splitWithStrategy(c, text, generic, { childMinChars: 1, sizeFor: () => 6 })
+    expect(strict.children.length).toBeGreaterThan(1)
+    // un sizeFor generoso devuelve menos chunks que el estricto
+    const loose = splitWithStrategy(c, text, generic, { childMinChars: 1, sizeFor: () => 100000 })
+    expect(loose.children.length).toBeLessThan(strict.children.length)
+  })
 })

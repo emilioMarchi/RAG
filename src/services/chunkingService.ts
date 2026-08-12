@@ -462,13 +462,17 @@ export class ChunkingService {
   splitHierarchical(
     text: string,
     mimeType: string = '',
-    options: { parentMaxChars?: number; childMaxChars?: number; childMinChars?: number; pages?: PdfPage[] } = {}
+    options: {
+      parentMaxChars?: number; childMaxChars?: number; childMinChars?: number; pages?: PdfPage[];
+      /** Fase 7: tamaño máx. por segmento (adaptativo). Si se omite → tamaño fijo (cero regresión). */
+      sizeFor?: (segment: { text: string }) => number;
+    } = {}
   ): HierarchicalChunks {
-    const { parentMaxChars = 1800, childMaxChars = 450, childMinChars = 80, pages } = options;
+    const { parentMaxChars = 1800, childMaxChars = 450, childMinChars = 80, pages, sizeFor } = options;
     const lineIndex = this.buildLineIndex(text);
 
     // 1. Obtener parent chunks: bloques grandes (con offsets sobre `text`)
-    const parentSlices = this.splitSlices(text, parentMaxChars, mimeType);
+    const parentSlices = this.splitSlices(text, parentMaxChars, mimeType, sizeFor);
 
     const parents: ParentChunk[] = [];
     const children: ChildChunk[] = [];
@@ -478,7 +482,7 @@ export class ChunkingService {
       const startChildIndex = globalChildIndex;
 
       // 2. Dividir cada parent en children más pequeños
-      const childSlices = this.splitSlices(parentSlice.text, childMaxChars)
+      const childSlices = this.splitSlices(parentSlice.text, childMaxChars, undefined, sizeFor)
         .filter(s => s.text.length >= childMinChars);
 
       for (const childSlice of childSlices) {
@@ -675,7 +679,8 @@ export class ChunkingService {
   private splitSlices(
     text: string,
     maxChars: number,
-    mimeType?: string
+    mimeType?: string,
+    sizeFor?: (segment: { text: string }) => number
   ): Array<{ text: string; start: number }> {
     if (mimeType && this.isPDF(mimeType)) {
       // Para PDFs usamos el splitter especializado (los offsets son aproximados;
@@ -691,7 +696,7 @@ export class ChunkingService {
       return slices;
     }
 
-    const blocks = this.splitStructural(text, maxChars);
+    const blocks = this.splitStructural(text, maxChars, { sizeFor });
     return blocks;
   }
 
@@ -705,9 +710,10 @@ export class ChunkingService {
   public splitStructural(
     text: string,
     maxChars: number,
-    opts: { minChars?: number } = {}
+    opts: { minChars?: number; sizeFor?: (segment: { text: string }) => number } = {}
   ): Array<{ text: string; start: number; end: number }> {
     const minChars = opts.minChars ?? 1;
+    const sizeFor = opts.sizeFor;
     const segments = this.sliceByBoundaries(text, detectBoundaries(text));
 
     const out: Array<{ text: string; start: number; end: number }> = [];
@@ -726,17 +732,19 @@ export class ChunkingService {
     };
 
     for (const seg of segments) {
-      // Bloque único que excede el tope → fallback a cortes por oración/línea.
-      if (seg.text.length > maxChars) {
+      const segMax = sizeFor ? sizeFor({ text: seg.text }) : maxChars;
+
+      // Bloque único que excede su tope → fallback a cortes por oración/línea.
+      if (seg.text.length > segMax) {
         flush();
-        for (const piece of this.sliceOversized(seg.text, maxChars)) {
+        for (const piece of this.sliceOversized(seg.text, segMax)) {
           out.push({ text: piece.text, start: seg.start + piece.start, end: seg.start + piece.end });
         }
         continue;
       }
 
       const sepLen = buffer.length > 0 ? PAGE_SEP.length : 0;
-      if (buffer.length > 0 && bufferLen + sepLen + seg.text.length > maxChars) flush();
+      if (buffer.length > 0 && bufferLen + sepLen + seg.text.length > segMax) flush();
       buffer.push(seg);
       bufferLen += bufferLen === 0 ? seg.text.length : sepLen + seg.text.length;
     }

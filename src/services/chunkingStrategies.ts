@@ -30,6 +30,11 @@ export interface ChunkingStrategyConfig {
   childMinChars: number;
   /** Limpieza previa opcional del texto antes de fragmentar */
   clean?: (text: string) => string;
+  /**
+   * Fase 7 (opcional): tamaño máx. por segmento (adaptativo por densidad).
+   * Si se omite → `parent/childMaxChars` fijos (comportamiento actual, cero regresión).
+   */
+  sizeFor?: (segment: { text: string }) => number;
 }
 
 /**
@@ -181,6 +186,8 @@ export interface StrategySplittingOptions {
   childMinChars?: number;
   /** Fase 3: caracteres de solape hacia atrás entre child chunks (~50–100). Default 0. */
   overlapChars?: number;
+  /** Fase 7: tamaño máx. por segmento (adaptativo). Default: config de la estrategia. */
+  sizeFor?: (segment: { text: string }) => number;
   pages?: PdfPage[];
   mimeType?: string;
 }
@@ -238,6 +245,7 @@ export function splitWithStrategy(
     parentMaxChars: opts.parentMaxChars ?? strategy.config.parentMaxChars,
     childMaxChars: opts.childMaxChars ?? strategy.config.childMaxChars,
     childMinChars: opts.childMinChars ?? strategy.config.childMinChars,
+    sizeFor: opts.sizeFor ?? strategy.config.sizeFor,
   });
 
   // Fase 6 — Contexto normativo: para la estrategia legal, reconstruir el outline

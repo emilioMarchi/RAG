@@ -89,6 +89,50 @@ describe('splitHierarchical location', () => {
   })
 })
 
+describe('sanitizeLayout (Fase 0)', () => {
+  const header = { str: 'Boletín Oficial N° 34.120', x: 0.2, y: 0.05, width: 0.4, height: 0.03 }
+  const footer = { str: 'Página de cierre', x: 0.2, y: 0.95, width: 0.4, height: 0.03 }
+  const body = { str: 'Contenido real del artículo.', x: 0.1, y: 0.5, width: 0.5, height: 0.04 }
+
+  it('quita headers y footers repetidos en varias páginas pero conserva el cuerpo', () => {
+    const pages = [1, 2, 3, 4].map(pageNumber => ({
+      pageNumber,
+      text: '',
+      items: [header, body, footer],
+      ranges: [] as never,
+    }))
+    const out = c.sanitizeLayout(pages as never)
+    expect(out).toHaveLength(4)
+    for (const p of out) {
+      expect(p.text).not.toContain(header.str)
+      expect(p.text).not.toContain(footer.str)
+      expect(p.text).toContain(body.str)
+    }
+  })
+
+  it('conserva filas de borde que NO se repiten (no hay falso positivo)', () => {
+    const unique = { str: 'Contenido unico de esta pagina', x: 0.2, y: 0.05, width: 0.5, height: 0.03 }
+    const pages = [
+      { pageNumber: 1, text: '', items: [unique, body], ranges: [] as never },
+      { pageNumber: 2, text: '', items: [body], ranges: [] as never },
+      { pageNumber: 3, text: '', items: [body], ranges: [] as never },
+    ]
+    const out = c.sanitizeLayout(pages as never)
+    const pageStr = (i: number) => out[i].items.map(x => x.str)
+    expect(pageStr(0)).toContain(unique.str)
+    expect(pageStr(0)).toContain(body.str)
+  })
+
+  it('no toca documentos con pocas páginas (sin repetición significativa)', () => {
+    const pages = [
+      { pageNumber: 1, text: '', items: [header, body], ranges: [] as never },
+      { pageNumber: 2, text: '', items: [header, body], ranges: [] as never },
+    ]
+    const out = c.sanitizeLayout(pages as never)
+    expect(out[0].items.map(x => x.str)).toContain(header.str)
+  })
+})
+
 describe('splitStructural', () => {
   it('no parte dentro de un ARTÍCULO: corta en las fronteras de numeración', () => {
     const c2 = new ChunkingService()

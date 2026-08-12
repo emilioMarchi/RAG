@@ -34,6 +34,11 @@ const OCR_SCALE = 2;
 const OCR_LANG = process.env.OCR_LANG || 'spa';
 const OCR_MAX_PAGES = Number(process.env.OCR_MAX_PAGES || 60);
 const OCR_ENABLED = process.env.OCR_ENABLED !== 'false';
+// Fase 0 — Sanitización de layout: filas en la franja superior/inferior que se repiten
+// en varias páginas (headers/footers) se descartan del texto/vistazo.
+const LAYOUT_HEADER_RATIO = 0.12;
+const LAYOUT_FOOTER_RATIO = 0.12;
+const LAYOUT_MIN_REPEAT_PAGES = 3;
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const TESSDATA_DIR = path.resolve(__dirname, '..', '..', 'tessdata');
@@ -238,14 +243,18 @@ export class ChunkingService {
       await (loadingTask.destroy ? loadingTask.destroy() : Promise.resolve()).catch(() => undefined);
     }
 
-    const totalTextLen = this.buildFlatText(pages).replace(/\s/g, '').length;
+    // Fase 0 — Sanitización de layout: quitar headers/footers repetidos antes de evaluar
+    // el contenido y de fragmentar.
+    const sanitized = this.sanitizeLayout(pages);
+
+    const totalTextLen = this.buildFlatText(sanitized).replace(/\s/g, '').length;
 
     // PDF escaneado (sin capa de texto suficiente): fallback con OCR local.
     if (totalTextLen < MIN_OCR_TEXT_LENGTH) {
-      if (!OCR_ENABLED) return pages;
+      if (!OCR_ENABLED) return sanitized;
       return this.extractPDFPagesWithOCR(filePath);
     }
-    return pages;
+    return sanitized;
   }
 
   private buildPage(pageNumber: number, tc: PdfPageLike, vp: { width: number; height: number }): PdfPage {
@@ -278,6 +287,90 @@ export class ChunkingService {
     }
 
     return { pageNumber, text: pageText, items, ranges };
+  }
+
+  /**
+   * Fase 0 — Sanitización de layout. Detecta filas de texto en la franja superior
+   * (header) o inferior (footer) que se repiten en ≥ `LAYOUT_MIN_REPEAT_PAGES` páginas
+   * y las elimina del texto/ranges. Ofrece el `pageNumber` original intacto.
+   */
+  public sanitizeLayout(pages: PdfPage[]): PdfPage[] {
+    if (pages.length < LAYOUT_MIN_REPEAT_PAGES) return pages;
+
+    // 1. Contar cuántas páginas repiten cada fila de borde (header/footer).
+    const counts = new Map<string, number>();
+    for (const p of pages) {
+      const seenOnPage = new Set<string>();
+      for (const row of this.lineRows(p.items)) {
+        const isEdge = row.maxY <= LAYOUT_HEADER_RATIO || row.minY >= 1 - LAYOUT_FOOTER_RATIO;
+        if (!isEdge) continue;
+        const key = this.normalizeLayoutText(row.text);
+        if (key && !seenOnPage.has(key)) {
+          seenOnPage.add(key);
+          counts.set(key, (counts.get(key) ?? 0) + 1);
+        }
+      }
+    }
+
+    const blocked = new Set<string>();
+    for (const [key, count] of counts) {
+      if (count >= LAYOUT_MIN_REPEAT_PAGES) blocked.add(key);
+    }
+    if (blocked.size === 0) return pages;
+
+    // 2. Reconstruir cada página descartando las filas repetidas.
+    return pages.map(p => this.rebuildPageNoise(p, blocked));
+  }
+
+  /** Agrupa los ítems de una página en filas (líneas) por solape vertical. */
+  private lineRows(items: PdfTextItem[]): Array<{ indices: number[]; minY: number; maxY: number; text: string }> {
+    const sorted = items.map((it, i) => ({ it, i })).sort((a, b) => a.it.y - b.it.y || a.it.x - b.it.x);
+    const rows: Array<{ indices: number[]; minY: number; maxY: number; text: string }> = [];
+
+    for (const { it, i } of sorted) {
+      const top = it.y;
+      const bottom = it.y + it.height;
+      const row = rows.find(r => {
+        const overlap = Math.min(bottom, r.maxY) - Math.max(top, r.minY);
+        const minH = Math.min(bottom - top, r.maxY - r.minY);
+        return minH > 0 && overlap / minH > 0.4;
+      });
+      if (row) {
+        row.indices.push(i);
+        row.minY = Math.min(row.minY, top);
+        row.maxY = Math.max(row.maxY, bottom);
+        row.text = row.indices.map(idx => items[idx].str).join(' ');
+      } else {
+        rows.push({ indices: [i], minY: top, maxY: bottom, text: it.str });
+      }
+    }
+    return rows.sort((a, b) => a.minY - b.minY || a.indices[0] - b.indices[0]);
+  }
+
+  private normalizeLayoutText(text: string): string {
+    return text.toLowerCase().replace(/\s+/g, ' ').trim();
+  }
+
+  /** Reconstruye el texto/ranges de la página sin las filas de borde repetidas. */
+  private rebuildPageNoise(page: PdfPage, blocked: Set<string>): PdfPage {
+    const rows = this.lineRows(page.items);
+    const textItems: PdfTextItem[] = [];
+    const ranges: PdfPage['ranges'] = [];
+    let pageText = '';
+
+    for (const row of rows) {
+      if (blocked.has(this.normalizeLayoutText(row.text))) continue;
+      for (const i of row.indices) {
+        const it = page.items[i];
+        const start = pageText.length;
+        pageText += it.str;
+        textItems.push(it);
+        if (it.str.length > 0) ranges.push({ start, end: start + it.str.length, item: it });
+      }
+      pageText += '\n';
+    }
+
+    return { pageNumber: page.pageNumber, text: pageText, items: textItems, ranges };
   }
 
   /** Concatena las páginas en un único texto plano (mismo separador usado por el chunking). */

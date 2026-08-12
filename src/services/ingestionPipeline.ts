@@ -109,7 +109,12 @@ export class IngestionPipeline {
         5
       );
 
-      // 7. Persistir child chunks y sus relaciones de entidad en DB
+      // 7. Persistir child chunks y sus relaciones de entidad en DB.
+      // Fase 4 — Dedup de grafo: con overlap, la misma entidad puede aparecer en
+      // varios children contiguos. Un único mapa a nivel de documento evita re-insertar
+      // nodos duplicados y resuelve las relaciones contra el id persistido original.
+      const entityIdByName = new Map<string, string>();
+
       for (const ec of enrichedChildren) {
         const pRes = await client.query(
           `INSERT INTO document_paragraphs
@@ -127,27 +132,31 @@ export class IngestionPipeline {
         );
         const paragraphId = pRes.rows[0].id;
 
-        // Persistir Entidades encontradas en el fragmento
-        const entityMap = new Map<string, string>();
+        // Persistir Entidades encontradas en el fragmento (dedup a nivel de documento).
         for (const ent of ec.graphData.entities) {
           const key = (ent.name ?? '').toLowerCase().trim();
           if (!key) continue;
+
+          const existing = entityIdByName.get(key);
+          if (existing) {
+            continue; // ya persistida para este documento → no duplicar nodo
+          }
 
           const entRes = await client.query(
             `INSERT INTO document_entities (document_id, paragraph_id, entity_name, entity_type)
              VALUES ($1, $2, $3, $4) RETURNING id`,
             [docId, paragraphId, ent.name, ent.type ?? 'entity']
           );
-          entityMap.set(key, entRes.rows[0].id);
+          entityIdByName.set(key, entRes.rows[0].id);
         }
 
-        // Persistir Relaciones entre entidades del fragmento
+        // Persistir Relaciones entre entidades del fragmento (usa el mapa deduplicado)
         for (const rel of ec.graphData.relations) {
           const sourceKey = (rel.source_entity ?? '').toLowerCase().trim();
           const targetKey = (rel.target_entity ?? '').toLowerCase().trim();
-          
-          const sourceId = entityMap.get(sourceKey);
-          const targetId = entityMap.get(targetKey);
+
+          const sourceId = entityIdByName.get(sourceKey);
+          const targetId = entityIdByName.get(targetKey);
 
           if (sourceId && targetId) {
             await client.query(

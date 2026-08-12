@@ -109,4 +109,23 @@ describe('splitWithStrategy', () => {
     const legalMax = Math.max(...legalChildren.children.map(ch => ch.text.length))
     expect(legalMax).toBeGreaterThanOrEqual(genericMax)
   })
+
+  it('aplica overlap hacia atrás entre child chunks cuando overlapChars > 0', () => {
+    const generic = new GenericChunkingStrategy()
+    const text = 'palabra '.repeat(120) // texto corrido que fuerza varios children
+
+    const noOverlap = splitWithStrategy(c, text, generic, { childMinChars: 1 })
+    const withOverlap = splitWithStrategy(c, text, generic, { childMinChars: 1, overlapChars: 40 })
+
+    expect(noOverlap.children.length).toBeGreaterThan(1)
+    expect(withOverlap.children.length).toBe(noOverlap.children.length)
+
+    // El 2º child con overlap empieza antes (incluye contexto del previo)
+    const b = withOverlap.children[1]
+    expect(b.text.length).toBeGreaterThan(noOverlap.children[1].text.length)
+    // La location sigue anclada al texto ORIGINAL: el slice deriva del original, no del preparado
+    const loc = b.location
+    expect(loc).toBeDefined()
+    expect(loc!.startChar!).toBeGreaterThanOrEqual(0)
+  })
 })

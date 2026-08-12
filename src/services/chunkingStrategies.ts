@@ -178,6 +178,8 @@ export interface StrategySplittingOptions {
   parentMaxChars?: number;
   childMaxChars?: number;
   childMinChars?: number;
+  /** Fase 3: caracteres de solape hacia atrás entre child chunks (~50–100). Default 0. */
+  overlapChars?: number;
   pages?: PdfPage[];
   mimeType?: string;
 }
@@ -228,6 +230,7 @@ export function splitWithStrategy(
   opts: StrategySplittingOptions = {}
 ): ReturnType<ChunkingService['splitHierarchical']> {
   const prepared = strategy.prepare(text);
+  const overlapChars = opts.overlapChars ?? 0;
   // No pasamos `pages` al split jerárquico: la ubicación real la resolvemos abajo
   // contra el texto original para no desalinear bbox al usar texto ya limpio.
   const result = chunker.splitHierarchical(prepared.text, opts.mimeType ?? '', {
@@ -239,9 +242,18 @@ export function splitWithStrategy(
   const children = result.children.map(ch => {
     const loc = ch.location;
     if (!loc || loc.startChar == null || loc.endChar == null) return ch;
+
+    // Fase 3 — Overlap: retroceder el inicio del child sobre el texto preparado
+    // para incluir la cola del chunk anterior, sin perder contexto en el corte.
+    // La ubicación (línea/página/bbox) se sigue recalculando contra el texto original.
+    const extStart = Math.max(0, loc.startChar - overlapChars);
+    const extEnd = loc.endChar;
+    const textWithOverlap = overlapChars > 0 ? prepared.text.slice(extStart, extEnd) : ch.text;
+
     return {
       ...ch,
-      location: chunker.locateOnOriginal(text, opts.pages, loc.startChar, loc.endChar, prepared.index),
+      text: textWithOverlap,
+      location: chunker.locateOnOriginal(text, opts.pages, extStart, extEnd, prepared.index),
     };
   });
 

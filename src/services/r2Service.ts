@@ -86,6 +86,23 @@ export class StorageService {
     return { key: relName, publicUrl: null, isLocal: true };
   }
 
+  /** Lee el contenido binario de un archivo (modo local o R2) como Buffer. */
+  async readFile(key: string): Promise<Buffer> {
+    if (this.s3Client && this.bucketName) {
+      const command = new GetObjectCommand({ Bucket: this.bucketName, Key: key });
+      const response = await this.s3Client.send(command);
+      if (!response.Body) throw new Error('Empty object body');
+      const chunks: Buffer[] = [];
+      for await (const chunk of response.Body as AsyncIterable<Uint8Array>) {
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      }
+      return Buffer.concat(chunks);
+    }
+    const dir = this.resolveLocalDir();
+    const fullPath = path.join(dir, safeFileName(key));
+    return fs.readFileSync(fullPath);
+  }
+
   async getDownloadUrl(key: string, expiresInSeconds = 3600): Promise<string> {
     if (this.s3Client && this.bucketName) {
       const command = new GetObjectCommand({ Bucket: this.bucketName, Key: key });

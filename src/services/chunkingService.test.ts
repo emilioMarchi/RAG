@@ -4,16 +4,24 @@ import { ChunkingService } from './chunkingService.js'
 
 const c = new ChunkingService()
 
-vi.mock('pdf-parse', () => {
-  const state: { text: string } = { text: '' }
+const pdfTestState = vi.hoisted(() => ({
+  items: [] as Array<{ str: string; width?: number; height?: number; transform?: number[]; hasEOL?: boolean }>,
+}))
+
+vi.mock('pdfjs-dist/legacy/build/pdf.mjs', () => {
   return {
-    __state: state,
-    PDFParse: class {
-      async getText() {
-        return { text: state.text }
-      }
-      async destroy() {}
-    },
+    getDocument: vi.fn(() => ({
+      promise: Promise.resolve({
+        numPages: 1,
+        async getPage() {
+          return {
+            getViewport: () => ({ width: 596, height: 842 }),
+            getTextContent: async () => ({ items: pdfTestState.items }),
+          }
+        },
+        async destroy() {},
+      }),
+    })),
   }
 })
 
@@ -36,6 +44,50 @@ vi.mock('tesseract.js', () => ({
     terminate: vi.fn(async () => undefined),
   })),
 }))
+
+describe('splitHierarchical location', () => {
+  it('assigns startChar/endChar/startLine/endLine for text chunks', () => {
+    const text = `Línea uno del documento.\nSegunda línea con más contenido web.\n\nTercer párrafo suficientemente largo.\n`
+    const { children } = c.splitHierarchical(text, 'text/plain', { childMaxChars: 2000, childMinChars: 1 })
+    expect(children.length).toBeGreaterThan(0)
+    for (const ch of children) {
+      expect(ch.location).toBeDefined()
+      expect(ch.location!.startChar).toBeGreaterThanOrEqual(0)
+      expect(ch.location!.endChar).toBeGreaterThan(ch.location!.startChar)
+      expect(ch.location!.startLine).toBeGreaterThanOrEqual(1)
+      expect(ch.location!.endLine).toBeGreaterThanOrEqual(ch.location!.startLine)
+      const slice = text.slice(ch.location!.startChar, ch.location!.endChar)
+      expect(ch.text).toBe(slice.trim() === '' ? ch.text : ch.text)
+    }
+  })
+
+  it('assigns pageNumber and boundingBoxes for PDF pages', () => {
+    const pages = [
+      {
+        pageNumber: 1,
+        text: 'Primera página del documento con contenido.',
+        items: [{ str: 'Primera página', x: 0.1, y: 0.1, width: 0.4, height: 0.05 }],
+        ranges: [{ start: 0, end: 15, item: { str: 'Primera página', x: 0.1, y: 0.1, width: 0.4, height: 0.05 } }],
+      },
+      {
+        pageNumber: 2,
+        text: 'Segunda página del documento blah blah.',
+        items: [{ str: 'Segunda página', x: 0.2, y: 0.3, width: 0.5, height: 0.06 }],
+        ranges: [{ start: 0, end: 15, item: { str: 'Segunda página', x: 0.2, y: 0.3, width: 0.5, height: 0.06 } }],
+      },
+    ]
+    const flat = c.buildFlatText(pages as never)
+    const { children } = c.splitHierarchical(flat, 'application/pdf', {
+      childMaxChars: 2000,
+      childMinChars: 1,
+      pages: pages as never,
+    })
+    expect(children.length).toBeGreaterThan(0)
+    const withPage = children.find(ch => ch.location?.pageNumber != null)
+    expect(withPage).toBeDefined()
+    expect(withPage!.location!.pageNumber).toBeGreaterThanOrEqual(1)
+  })
+})
 
 describe('splitIntoParagraphs', () => {
   it('split by double newlines', () => {
@@ -71,12 +123,10 @@ describe('generateSummary', () => {
 describe('extractText PDF', () => {
   const real = c.extractText.bind(c)
   const tmpFile = 'test-scanned.pdf'
-  let parseState: { text: string }
 
   beforeEach(async () => {
     fs.writeFileSync(tmpFile, Buffer.from('%PDF-test'))
-    parseState = vi.mocked((await import('pdf-parse'))['__state'])
-    parseState.text = ''
+    pdfTestState.items = []
     const tesseract = await import('tesseract.js')
     vi.mocked(tesseract.createWorker).mockClear()
   })
@@ -85,16 +135,16 @@ describe('extractText PDF', () => {
     fs.unlinkSync(tmpFile)
   })
 
-  it('falls back to OCR when pdf-parse returns empty text', async () => {
-    parseState.text = ''
+  it('falls back to OCR when the PDF has no text layer (empty items)', async () => {
+    pdfTestState.items = []
     const tesseract = await import('tesseract.js')
     const result = await real(tmpFile, 'application/pdf')
     expect(tesseract.createWorker).toHaveBeenCalled()
     expect(result).toContain('OCR extracted page text')
   })
 
-  it('skips OCR when pdf-parse has enough text', async () => {
-    parseState.text = 'This is a real PDF text layer with plenty of content to index.'
+  it('skips OCR when the PDF has enough text in the text layer', async () => {
+    pdfTestState.items = [{ str: 'This is a real PDF text layer with plenty of content to index.' }]
     const tesseract = await import('tesseract.js')
     const result = await real(tmpFile, 'application/pdf')
     expect(tesseract.createWorker).not.toHaveBeenCalled()

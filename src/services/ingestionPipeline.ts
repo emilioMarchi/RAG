@@ -1,7 +1,8 @@
 import { EmbeddingService } from './embeddingService.js';
 import { LLMService } from './llmService.js';
 import { StorageService } from './r2Service.js';
-import { ChunkingService } from './chunkingService.js';
+import { ChunkingService, PdfPage } from './chunkingService.js';
+import { ChunkingStrategySelector, ChunkingFileMetadata, resolveChunkingStrategy, splitWithStrategy } from './chunkingStrategies.js';
 import { getClient } from '../config/db.js';
 import { mapConcurrent } from '../utils/concurrency.js';
 
@@ -10,7 +11,8 @@ export class IngestionPipeline {
     private embedder: EmbeddingService,
     private llm: LLMService,
     private storage: StorageService,
-    private chunker: ChunkingService = new ChunkingService()
+    private chunker: ChunkingService = new ChunkingService(),
+    private strategySelector: ChunkingStrategySelector = new ChunkingStrategySelector()
   ) {}
 
   async processAndStoreDocument(params: {
@@ -19,10 +21,14 @@ export class IngestionPipeline {
     fileName: string;
     mimeType: string;
     fullContentText: string;
+    /** Páginas con layout del PDF origen, para asignar pageNumber/boundingBoxes a cada chunk */
+    pages?: PdfPage[];
+    /** Metadatos del archivo para seleccionar la estrategia de chunking */
+    chunkingMetadata?: ChunkingFileMetadata;
     /** @deprecated Use fullContentText; se ignora si se usa chunking jerárquico */
     paragraphs?: string[];
   }) {
-    const { title, fileBuffer, fileName, mimeType, fullContentText } = params;
+    const { title, fileBuffer, fileName, mimeType, fullContentText, pages, chunkingMetadata } = params;
 
     const client = await getClient();
 
@@ -45,7 +51,18 @@ export class IngestionPipeline {
       const docSummary = this.generateDocSummary(fullContentText);
 
       // 4. Chunking jerárquico: parent chunks + child chunks
-      const { parents, children } = this.chunker.splitHierarchical(fullContentText, mimeType);
+      //    Elige la estrategia por la selección del usuario y, en 'auto', por
+      //    contenido del texto (heurística). Las explícitas nunca se sobrescriben.
+      const meta = chunkingMetadata ?? {
+        mimeType,
+        fileExtension: fileName.includes('.') ? fileName.slice(fileName.lastIndexOf('.')) : '',
+      };
+      const resolved = resolveChunkingStrategy(meta, fullContentText);
+      const strategy = resolved.strategy;
+      const { parents, children } = splitWithStrategy(this.chunker, fullContentText, strategy, {
+        mimeType,
+        pages,
+      });
 
       // 5. Almacenar parent chunks y obtener sus IDs de DB
       const parentDbIds: string[] = [];
@@ -84,6 +101,7 @@ export class IngestionPipeline {
             contextualized_text: ctxText,
             keywords: enriched.keywords || [],
             category: enriched.category || 'general',
+            location: child.location ?? null,
             highVector,
             graphData,
           };
@@ -102,7 +120,7 @@ export class IngestionPipeline {
             ec.childIndex,
             ec.rawText,
             ec.contextualized_text,
-            JSON.stringify({ keywords: ec.keywords, category: ec.category }),
+            JSON.stringify({ keywords: ec.keywords, category: ec.category, location: ec.location }),
             JSON.stringify(ec.highVector),
             ec.parentChunkId,
           ]
@@ -148,6 +166,8 @@ export class IngestionPipeline {
         r2Key: uploadResult.key,
         parentChunksStored: parents.length,
         childChunksStored: children.length,
+        strategy: strategy.config.name,
+        strategySource: resolved.source,
       };
     } catch (error) {
       await client.query('ROLLBACK');

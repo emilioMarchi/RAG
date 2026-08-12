@@ -44,6 +44,8 @@ const nodeDetail   = document.getElementById('node-detail');
 const nodeDetailT  = document.getElementById('node-detail-title');
 const nodeDetailB  = document.getElementById('node-detail-body');
 const nodeDetailCl = document.getElementById('node-detail-close');
+const nodeDetailView = document.getElementById('node-detail-view');
+let lastSelNode = null;
 const chatMsgs     = document.getElementById('chat-messages');
 const chatInput    = document.getElementById('chat-input');
 const btnSend      = document.getElementById('btn-send');
@@ -212,12 +214,23 @@ async function uploadFile(file) {
   const fd = new FormData();
   fd.append('file', file);
 
+  const strategy = document.getElementById('ingest-strategy')?.value || 'auto';
+  fd.append('chunkingStrategy', strategy);
+  if (strategy === 'legal') {
+    fd.append('domain', 'legal');
+    fd.append('fileType', 'pdf_normativo');
+  } else if (strategy === 'generic') {
+    fd.append('domain', 'general');
+  }
+
   setProgress(item, 30, 'Subiendo…');
 
   try {
     setProgress(item, 60, 'Procesando…');
     const res = await api('/api/upload', { method: 'POST', body: fd });
-    setProgress(item, 100, `✓ ${res.paragraphsProcessed} fragmentos`, 'ok');
+    const stratName = res.strategy === 'legal' ? 'Legal' : res.strategy === 'generic' ? 'Genérica' : '';
+    const stratOrigin = res.strategySource === 'detected' ? ' (detectada)' : res.strategySource === 'manual' ? ' (manual)' : '';
+    setProgress(item, 100, `✓ ${res.childChunksStored ?? res.paragraphsProcessed ?? ''} fragmentos${stratName ? ` · ${stratName}${stratOrigin}` : ''}`, 'ok');
     setTimeout(() => item.remove(), 4000);
     await fetchDocuments();
   } catch (err) {
@@ -327,7 +340,7 @@ async function initGraph() {
   });
 
   network.on('click', (params) => {
-    if (params.nodes.length === 0) { nodeDetail.style.display = 'none'; return; }
+    if (params.nodes.length === 0) { nodeDetail.style.display = 'none'; updateNodeViewButton(null); return; }
     const nodeId = params.nodes[0];
     const node = nodesDS.get(nodeId);
     if (!node) return;
@@ -343,9 +356,17 @@ async function initGraph() {
     nodeDetailT.textContent = title;
     nodeDetailB.textContent = node._content || '';
     nodeDetail.style.display = 'block';
+    updateNodeViewButton(node); // solo muestra el botón "Ver en PDF/documento"
   });
 
   nodeDetailCl.addEventListener('click', () => { nodeDetail.style.display = 'none'; });
+
+  // Botón único para abrir el visor del documento original (fragmento seleccionado)
+  nodeDetailView.addEventListener('click', () => {
+    if (!lastSelNode || lastSelNode._type !== 'frag' || !lastSelNode._docId) return;
+    const doc = documents.find(d => d.id === lastSelNode._docId);
+    window.openDocViewer?.(lastSelNode._docId, lastSelNode._location, lastSelNode._docMime, doc?.title, lastSelNode._content);
+  });
   btnResetG.addEventListener('click', () => {
     network.setOptions({ physics: { enabled: true } });
     network.stabilize(150);
@@ -444,7 +465,9 @@ async function refreshGraph() {
             font: { color: colors.fragText, size: 10 },
             _type: 'frag',
             _docId: doc.id,
+            _docMime: doc.mime_type,
             _baseColors: colors,
+            _location: p.location,
             _content: p.raw_content,
           });
 
@@ -635,6 +658,17 @@ function renderExplorer() {
 }
 
 // Expone globalmente para los clics en los badges del explorador
+function updateNodeViewButton(node) {
+  lastSelNode = node && node._type === 'frag' && node._docId ? node : null;
+  if (!nodeDetailView) return;
+  const show = !!lastSelNode;
+  nodeDetailView.style.display = show ? 'block' : 'none';
+  if (show) {
+    const isPdf = node._docMime && String(node._docMime).toLowerCase().includes('pdf');
+    nodeDetailView.textContent = isPdf ? 'Ver en PDF' : 'Ver en documento';
+  }
+}
+
 window.focusNodeInGraph = function(nodeId) {
   const graphTabBtn = document.querySelector('.tab[data-tab="graph"]');
   if (graphTabBtn) graphTabBtn.click();
@@ -659,6 +693,7 @@ if (network && nodesDS.get(nodeId)) {
     nodeDetailT.textContent = title;
     nodeDetailB.textContent = node._content || '';
     nodeDetail.style.display = 'block';
+    updateNodeViewButton(node);
   }
 };
 
@@ -850,6 +885,16 @@ async function runGraphQuery() {
     btnGQuery.textContent = 'Buscar';
   }
 }
+
+// Documento → Grafo: buscar similitud con el texto seleccionado en el visor
+window.searchGraphForText = function (text) {
+  const q = (text || '').trim();
+  if (!q) return;
+  graphInput.value = q;
+  const graphTabBtn = document.querySelector('.tab[data-tab="graph"]');
+  if (graphTabBtn) graphTabBtn.click();
+  runGraphQuery();
+};
 
 // ─── Chat ─────────────────────────────────────────────────────────────────────
 btnSend.addEventListener('click', sendChat);

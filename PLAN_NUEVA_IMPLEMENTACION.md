@@ -1,133 +1,86 @@
-# Plan de Implementación: RAG Avanzado
+📄 Especificaciones de Arquitectura de Ingesta Modular (RAG Multipropósito)
+Objetivo: Diseñar una estrategia de ingesta y chunking extensible que utilice un procesamiento genérico por defecto, pero permita estrategias especializadas según el tipo/extensión o dominio del documento (comenzando con la estrategia para Normativas/Leyes).
 
-> Basado en el archivo `nueva-implementacion` del proyecto
+📋 Instrucciones para el Agente de Desarrollo
+Instrucción de Inicio:
 
-## Estado actual del sistema
+Revisa la lógica actual de carga e ingesta de documentos. Implementa un patrón de diseño Estrategia (Strategy Pattern) o Pipeline de Procesamiento para separar el Chunking Genérico de las reglas especializadas por tipo de archivo.
 
-El sistema RAG actual tiene:
-- **Búsqueda jerárquica 2 capas**: embedding 768d (docs) + 1536d (párrafos)
-- **IterativeRAGEngine**: descomposición de queries + expansión iterativa de contexto
-- **ChunkingService**: extracción de texto de PDF, DOCX, TXT, XML con OCR fallback
-- **LLMService**: enrichChunk, evaluateContext, generateRAGAnswer, decomposeQuery
+1. Arquitectura de Ingesta y Selección de Estrategia
+Crea un selector de estrategia de chunking según los metadatos o extensión del archivo al momento de cargarlo:
 
----
+Python
+class ChunkingStrategySelector:
+    def get_strategy(self, file_metadata: dict):
+        # 1. Si el usuario o el sistema clasifica el documento como normativo/legal
+        if file_metadata.get("domain") == "legal" or file_metadata.get("file_type") == "pdf_normativo":
+            return LegalNormChunkingStrategy()
+        
+        # 2. Estrategia para Markdown / Documentación Técnica (Futura extensión)
+        elif file_metadata.get("file_extension") == ".md":
+            return MarkdownChunkingStrategy()
+            
+        # 3. Fallback: Estrategia Genérica Multipropósito
+        return GenericChunkingStrategy()
+2. Estrategia A: GenericChunkingStrategy (Default Multipropósito)
+Uso: Para cualquier documento no clasificado o de propósito general (reportes, PDFs estándar, TXT, etc.).
 
-## Tareas a Implementar
+Configuración:
 
-### Task 1 — Búsqueda Híbrida (Vectorial + BM25)
+chunk_size: 800 - 1000 caracteres.
 
-**Problema**: La búsqueda puramente vectorial no recupera bien códigos, IDs, fechas o montos exactos.
+chunk_overlap: 150 - 200 caracteres.
 
-**Solución**:
-- Implementar `HybridSearchService` combinando:
-  - **Dense retrieval**: embeddings existentes (768d y 1536d)
-  - **Sparse retrieval / BM25**: búsqueda léxica sobre `raw_content` usando `ts_vector` + GIN de Postgres (sin dependencias externas)
-- Fusionar rankings con **Reciprocal Rank Fusion (RRF)**, pesos `[0.6 vectorial + 0.4 BM25]`
+separators: ["\n\n", "\n", ". ", " ", ""] (Corta por párrafos, luego oraciones y finalmente palabras).
 
-**Archivos**:
-| Acción | Archivo |
-|--------|---------|
-| ✨ Crear | `src/migrations/002_bm25_indexes.sql` |
-| ✨ Crear | `src/services/hybridSearchService.ts` |
-| ✏️ Modificar | `src/services/ragEngine.ts` |
-| ✏️ Modificar | `src/services/iterativeRAGEngine.ts` |
+3. Estrategia B: LegalNormChunkingStrategy (Especializada en Leyes/PDFs)
+Uso: Archivos clasificados como normativas, leyes, decretos o regulaciones.
 
----
+Limpieza Previa (Regex): Reconstruye palabras cortadas por saltos de página o guiones del PDF antes de fragmentar:
 
-### Task 2 — Re-ranking con Cross-Encoder (vía LLM)
+Python
+import re
 
-**Problema**: Los top-K del retriever no siempre son los más relevantes para la query final.
+def clean_pdf_text(text: str) -> str:
+    # Unir palabras cortadas por salto de línea (ej. "perso-\nnales" o "perso\nnales")
+    text = re.sub(r'(\w+)-\s*\n\s*(\w+)', r'\1\2', text)
+    text = re.sub(r'(?<!\n)\n(?!\n)', ' ', text)
+    return text.strip()
+Configuración de Fragmentación:
 
-**Solución**:
-- Recuperar `top_k = 20` fragmentos del retriever inicial
-- Puntuar cada fragmento con el LLM (cross-encoder scoring en un único batch)
-- Seleccionar los **top 6–8** con mayor score de relevancia cruzada para el prompt final
+chunk_size: 1200 - 1500 caracteres (Permite capturar definiciones e incisos completos).
 
-**Archivos**:
-| Acción | Archivo |
-|--------|---------|
-| ✨ Crear | `src/services/rerankingService.ts` |
-| ✏️ Modificar | `src/services/llmService.ts` — agregar `rerankChunks()` |
-| ✏️ Modificar | `src/services/ragEngine.ts` — integrar re-ranking |
-| ✏️ Modificar | `src/services/iterativeRAGEngine.ts` — integrar re-ranking |
+chunk_overlap: 250 - 300 caracteres.
 
----
+separators: Prioriza la estructura legal antes de cortar por párrafo:
 
-### Task 3 — Chunking Jerárquico Parent-Child
+Python
+separators = [
+    "\n\nARTICULO ", 
+    "\n\nArt. ", 
+    "\n\n— ",       # Guiones/viñetas de definición
+    "\n\n", 
+    "\n", 
+    " "
+]
+4. Re-ranking y System Prompt (Aplicables a todo el Pipeline)
+Independientemente de la estrategia de chunking seleccionada:
 
-**Problema**: Los chunks pequeños pierden el contexto global de la sección a la que pertenecen.
+Reranking / Cross-Encoder:
 
-**Solución**:
-- **Child Chunks** (para búsqueda): 300–500 chars, usados para vectorizar y rankear
-- **Parent Chunks** (para generación): 1200–2000 chars, entregados al LLM como contexto real
-- Al encontrar un Child relevante → recuperar su Parent completo para el prompt
+Elevar la búsqueda inicial a top_k = 15-20 fragmentos.
 
-**Archivos**:
-| Acción | Archivo |
-|--------|---------|
-| ✨ Crear | `src/migrations/003_parent_chunks.sql` |
-| ✏️ Modificar | `src/services/chunkingService.ts` — agregar `splitHierarchical()` |
-| ✏️ Modificar | `src/services/ingestionPipeline.ts` — almacenar parent chunks |
-| ✏️ Modificar | `src/services/ragEngine.ts` — al recuperar hijos, traer su parent |
+Filtrar con Reranker para entregar solo los top 4 a 6 fragmentos con mayor puntuación semántica al LLM, reduciendo el ruido.
 
----
+System Prompt Ajustado (Generación más explicativa):
 
-### Task 4 — Sub-queries / Multi-Query (mejora del existente)
+Actualizar las instrucciones del sistema para evitar respuestas de una sola oración:
 
-**Estado**: `IterativeRAGEngine` ya descompone queries con `llm.decomposeQuery()`. Falta:
-- Mejorar la fusión de resultados multi-query con **RRF** (actualmente es solo concat + dedup)
-- Hacer el engine iterativo la ruta **por defecto** en lugar de opcional
+"Eres un asistente experto en análisis de documentación. Responde a la pregunta del usuario de forma clara, directa y estructurada. Desarrolla la respuesta explicando el contexto de la sección/norma donde se encuentra la información. Si la respuesta involucra listas o procedimientos, enumera los elementos completos sin omitir detalles. Cita siempre el documento o sección fuente."
 
-**Archivos**:
-| Acción | Archivo |
-|--------|---------|
-| ✏️ Modificar | `src/services/iterativeRAGEngine.ts` — fusión RRF multi-query |
-| ✏️ Modificar | `src/routes/query.ts` — engine iterativo como default |
+🧪 Criterios de Aceptación para Desarrollo
+Modularidad: El código debe permitir procesar un archivo con la lógica genérica sin romper la ingesta, pero poder elegir la lógica de LegalNormChunkingStrategy mediante un parámetro o etiqueta.
 
----
+Prueba de Ingesta Legal: Al procesar la ley con la estrategia legal, las definiciones largas (ej. Tratamiento de Datos) no deben quedar cortadas en fragmentos pequeños e inconexos.
 
-## Criterios de Aceptación
-
-1. **Test de cruce de fuentes**: query que requiere 2 archivos distintos → contexto incluye fragmentos de ambos documentos
-2. **Test de dato exacto**: query con un código, fecha o monto específico → BM25 lo recupera correctamente  
-3. **Test de faltante de contexto**: pregunta sin información en los archivos → el sistema declara ausencia sin inventar
-
----
-
-## Orden de Implementación
-
-```
-[1] ✅  Migration: BM25 indexes (GIN + ts_vector)
-[2] ✅  HybridSearchService
-[3] ✅  Integrar Hybrid en ragEngine
-[4] ✅  Integrar Hybrid en iterativeRAGEngine (RRF multi-query)
-[5] ✅  LLMService: rerankChunks()
-[6] ✅  RerankingService
-[7] ✅  Integrar Re-ranking en query pipeline
-[8] ✅  Migration: parent_chunks table
-[9] ✅  ChunkingService: splitHierarchical()
-[10] ✅ IngestionPipeline: almacenar parent chunks
-[11] ✅ RagEngine: recuperar parent chunks al hacer query
-[12] ✅ /query usa engine iterativo por defecto
-[13]    Correr migración en DB + smoke test manual
-```
-
----
-
-## Progreso
-
-| # | Tarea | Estado |
-|---|-------|--------|
-| 1 | Migration BM25 (GIN + ts_vector) | ✅ Completo |
-| 2 | HybridSearchService | ✅ Completo |
-| 3 | Integrar Hybrid en ragEngine | ✅ Completo |
-| 4 | Integrar Hybrid en iterativeRAGEngine | ✅ Completo |
-| 5 | LLMService: rerankChunks | ✅ Completo |
-| 6 | RerankingService | ✅ Completo |
-| 7 | Integrar Re-ranking en query pipeline | ✅ Completo |
-| 8 | Migration parent_chunks table | ✅ Completo |
-| 9 | ChunkingService: splitHierarchical | ✅ Completo |
-| 10 | IngestionPipeline: parent chunks | ✅ Completo |
-| 11 | RagEngine: recuperar parent chunks | ✅ Completo |
-| 12 | RRF multi-query en iterativeRAGEngine | ✅ Completo |
-| 13 | Correr migraciones en DB + smoke test | ⬜ Pendiente |
+Calidad de Respuesta: Las respuestas generadas deben ser más ricas en contexto sin importar el tipo de archivo procesado.

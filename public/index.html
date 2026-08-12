@@ -11,6 +11,7 @@
   <link rel="stylesheet" href="https://unpkg.com/vis-network/styles/vis-network.min.css" />
   <link rel="stylesheet" href="style.css" />
   <script src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
+  <script src="https://unpkg.com/pdfjs-dist@2.16.105/build/pdf.min.js"></script>
 </head>
 <body>
 
@@ -42,6 +43,14 @@
         <div class="upload-icon">📤</div>
         <p class="upload-label">Arrastrá archivos aquí</p>
         <p class="upload-sub">PDF · DOCX · TXT · MD · XML</p>
+        <label class="upload-strategy">
+          <span>Estrategia de ingesta</span>
+          <select id="ingest-strategy">
+            <option value="auto">Automática</option>
+            <option value="generic">Genérica (multipropósito)</option>
+            <option value="legal">Normativa / Legal</option>
+          </select>
+        </label>
         <button class="btn-upload" id="btn-pick-file">Seleccionar archivo</button>
       </div>
 
@@ -134,6 +143,7 @@
           <button class="node-detail-close" id="node-detail-close">✕</button>
           <h4 class="node-detail-title" id="node-detail-title"></h4>
           <p class="node-detail-body" id="node-detail-body"></p>
+          <button class="node-detail-view" id="node-detail-view" style="display:none">Ver en documento</button>
         </div>
 
         <!-- Search bar -->
@@ -212,6 +222,28 @@
     </section>
   </main>
 
+  <!-- ─── Document Context Viewer ───────────────────────────── -->
+  <div class="viewer-overlay" id="doc-viewer" style="display:none">
+    <div class="viewer-shell">
+      <div class="viewer-header">
+        <span class="viewer-title" id="viewer-title">Documento</span>
+        <div class="viewer-header-actions">
+          <button class="viewer-btn" id="viewer-search-sel" title="Buscar selección en el grafo" style="display:none">🔍 Buscar selección</button>
+          <button class="viewer-close" id="viewer-close" title="Cerrar">✕</button>
+        </div>
+      </div>
+      <div class="viewer-target" id="viewer-target"></div>
+      <div class="viewer-scroll" id="viewer-scroll">
+        <div class="viewer-pdf" id="viewer-pdf"></div>
+        <div class="viewer-text hidden" id="viewer-text"></div>
+      </div>
+    </div>
+    <div class="viewer-menu" id="viewer-menu" style="display:none">
+      <button id="viewer-menu-search">Buscar similitud en el grafo</button>
+    </div>
+  </div>
+
+  <script type="module" src="viewer.js"></script>
   <script type="module" src="app.js"></script>
 </body>
 </html>

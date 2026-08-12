@@ -2,6 +2,26 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
+interface PdfTextItemLike {
+  str?: string;
+  width?: number;
+  height?: number;
+  transform?: number[];
+  hasEOL?: boolean;
+}
+
+interface PdfPageLike {
+  num: number;
+  items?: PdfTextItemLike[];
+  styles?: Record<string, unknown>;
+  viewport: { width: number; height: number };
+}
+
+const getDocument = async (): Promise<typeof import('pdfjs-dist/legacy/build/pdf.mjs')> =>
+  import('pdfjs-dist/legacy/build/pdf.mjs');
+
+const PAGE_SEP = '\n\n';
+
 const HEADING_RE = /^#{1,6}\s/;
 const MIN_PARAGRAPH_LENGTH = 20;
 const PDF_MAX_FRAGMENT_CHARS = 1200;
@@ -17,12 +37,48 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const TESSDATA_DIR = path.resolve(__dirname, '..', '..', 'tessdata');
 
+export interface BoundingBox {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface ChunkLocation {
+  /** Página (1-indexed) del documento PDF que contiene el fragmento */
+  pageNumber?: number;
+  startChar?: number;
+  endChar?: number;
+  startLine?: number;
+  endLine?: number;
+  boundingBoxes?: BoundingBox[];
+}
+
+/** Ítem de la capa de texto de un PDF con su caja delimitadora normalizada */
+export interface PdfTextItem {
+  str: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/** Página de un PDF con su texto y las posiciones de cada fragmento de texto */
+export interface PdfPage {
+  pageNumber: number;
+  text: string;
+  items: PdfTextItem[];
+  ranges: Array<{ start: number; end: number; item: PdfTextItem }>;
+}
+
 export interface ChildChunk {
   text: string;
   /** Índice del chunk hijo dentro del documento */
   childIndex: number;
   /** Índice del parent chunk al que pertenece este hijo */
   parentIndex: number;
+  /** Ubicación del fragmento dentro del documento original */
+  location?: ChunkLocation;
 }
 
 export interface ParentChunk {
@@ -145,32 +201,90 @@ export class ChunkingService {
     return text.substring(0, maxChars).replace(/\s+\S*$/, '') + '...';
   }
 
+  /** Devuelve el texto plano de un PDF (compatible con el resto del pipeline). */
   private async extractPDF(filePath: string): Promise<string> {
-    // pdf-parse v2 exporta la clase PDFParse (API ESM), no una función.
-    const pdfParseModule = await import('pdf-parse') as any;
-    const PDFParse = pdfParseModule.PDFParse;
-    const dataBuffer = fs.readFileSync(filePath);
-    const parser = new PDFParse({ data: dataBuffer });
-    try {
-      const result = await parser.getText();
-      const text = result.text || '';
-
-      // Vía rápida: si el PDF tiene capa de texto suficiente, se usa tal cual.
-      if (text.replace(/\s/g, '').length >= MIN_OCR_TEXT_LENGTH) {
-        return text;
-      }
-
-      // PDF escaneado (sin capa de texto): fallback con OCR local.
-      if (!OCR_ENABLED) {
-        return text;
-      }
-      return this.extractPDFWithOCR(filePath);
-    } finally {
-      await parser.destroy().catch(() => undefined);
-    }
+    const pages = await this.extractPDFPages(filePath);
+    return this.buildFlatText(pages);
   }
 
-  private async extractPDFWithOCR(filePath: string): Promise<string> {
+  /**
+   * Extrae cada página de un PDF con su texto y, cuando hay capa de texto, las
+   * posiciones (bounding boxes normalizados). Las páginas se devuelven para que
+   * el chunking pueda asignar pageNumber y boundingBoxes a cada fragmento.
+   */
+  async extractPDFPages(filePath: string): Promise<PdfPage[]> {
+    const pdfjs = await getDocument();
+    const data = new Uint8Array(fs.readFileSync(filePath));
+    const loadingTask = (pdfjs.getDocument as any)({ data, disableWorker: true, useSystemFonts: true });
+    const doc = await loadingTask.promise as {
+      numPages: number;
+      getPage: (n: number) => Promise<
+        PdfPageLike & { getViewport: (o: { scale: number }) => { width: number; height: number } } & {
+          getTextContent: () => Promise<PdfPageLike>;
+        }
+      >;
+    };
+
+    const pages: PdfPage[] = [];
+    try {
+      for (let n = 1; n <= doc.numPages; n++) {
+        const page = await doc.getPage(n);
+        const vp = page.getViewport({ scale: 1 });
+        const textContent = await page.getTextContent();
+        pages.push(this.buildPage(n, textContent as unknown as PdfPageLike, vp));
+      }
+    } finally {
+      await (loadingTask.destroy ? loadingTask.destroy() : Promise.resolve()).catch(() => undefined);
+    }
+
+    const totalTextLen = this.buildFlatText(pages).replace(/\s/g, '').length;
+
+    // PDF escaneado (sin capa de texto suficiente): fallback con OCR local.
+    if (totalTextLen < MIN_OCR_TEXT_LENGTH) {
+      if (!OCR_ENABLED) return pages;
+      return this.extractPDFPagesWithOCR(filePath);
+    }
+    return pages;
+  }
+
+  private buildPage(pageNumber: number, tc: PdfPageLike, vp: { width: number; height: number }): PdfPage {
+    const items: PdfTextItem[] = [];
+    const ranges: PdfPage['ranges'] = [];
+    let pageText = '';
+
+    for (const raw of tc.items ?? []) {
+      const str = typeof raw.str === 'string' ? raw.str : '';
+      const transform = raw.transform ?? [1, 0, 0, 1, 0, 0];
+      const w = vp.width > 0 ? vp.width : 1;
+      const h = vp.height > 0 ? vp.height : 1;
+
+      const x = (transform[4] ?? 0) / w;
+      const height = (raw.height ?? 0) / h;
+      const y = h > 0 ? (h - (transform[5] ?? 0) - height) / h : 0;
+      const width = (raw.width ?? 0) / w;
+
+      const item: PdfTextItem = { str, x, y, width, height };
+
+      const start = pageText.length;
+      pageText += str;
+
+      if (str.length > 0) {
+        ranges.push({ start, end: start + str.length, item });
+      }
+      if (raw.hasEOL) {
+        pageText += '\n';
+      }
+    }
+
+    return { pageNumber, text: pageText, items, ranges };
+  }
+
+  /** Concatena las páginas en un único texto plano (mismo separador usado por el chunking). */
+  buildFlatText(pages: PdfPage[]): string {
+    return pages.map(p => p.text.trimEnd()).join(PAGE_SEP);
+  }
+
+  private async extractPDFPagesWithOCR(filePath: string): Promise<PdfPage[]> {
     const { pdf } = await import('pdf-to-img');
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const Tesseract = await import('tesseract.js') as any;
@@ -186,25 +300,26 @@ export class ChunkingService {
       logger: () => {},
     });
 
+    const pages: PdfPage[] = [];
     try {
-      let ocrText = '';
       let page = 0;
       for await (const image of document) {
-        if (page >= OCR_MAX_PAGES) break;
+        page += 1;
+        if (page > OCR_MAX_PAGES) break;
         try {
           const { data } = await worker.recognize(image);
-          ocrText += (data.text || '') + '\n\n';
+          const text = (data.text || '').trim();
+          pages.push({ pageNumber: page, text, items: [], ranges: [] });
         } catch (pageErr) {
-          console.warn('[OCR] Fallo en página', page + 1, pageErr instanceof Error ? pageErr.message : pageErr);
+          console.warn('[OCR] Fallo en página', page, pageErr instanceof Error ? pageErr.message : pageErr);
         }
-        page += 1;
       }
       await worker.terminate();
-      return ocrText;
     } catch (err) {
       await worker.terminate().catch(() => undefined);
       throw err;
     }
+    return pages;
   }
 
   private async extractDOCX(filePath: string): Promise<string> {
@@ -247,29 +362,33 @@ export class ChunkingService {
   splitHierarchical(
     text: string,
     mimeType: string = '',
-    options: { parentMaxChars?: number; childMaxChars?: number; childMinChars?: number } = {}
+    options: { parentMaxChars?: number; childMaxChars?: number; childMinChars?: number; pages?: PdfPage[] } = {}
   ): HierarchicalChunks {
-    const { parentMaxChars = 1800, childMaxChars = 450, childMinChars = 80 } = options;
+    const { parentMaxChars = 1800, childMaxChars = 450, childMinChars = 80, pages } = options;
+    const lineIndex = this.buildLineIndex(text);
 
-    // 1. Obtener parent chunks: bloques grandes
-    const parentTexts = this.splitBySize(text, parentMaxChars, mimeType);
+    // 1. Obtener parent chunks: bloques grandes (con offsets sobre `text`)
+    const parentSlices = this.splitSlices(text, parentMaxChars, mimeType);
 
     const parents: ParentChunk[] = [];
     const children: ChildChunk[] = [];
     let globalChildIndex = 0;
 
-    parentTexts.forEach((parentText, parentIndex) => {
+    parentSlices.forEach((parentSlice, parentIndex) => {
       const startChildIndex = globalChildIndex;
 
       // 2. Dividir cada parent en children más pequeños
-      const childTexts = this.splitBySize(parentText, childMaxChars)
-        .filter(t => t.length >= childMinChars);
+      const childSlices = this.splitSlices(parentSlice.text, childMaxChars)
+        .filter(s => s.text.length >= childMinChars);
 
-      for (const childText of childTexts) {
+      for (const childSlice of childSlices) {
+        const cStart = parentSlice.start + childSlice.start;
+        const cEnd = cStart + childSlice.text.length;
         children.push({
-          text: childText,
+          text: childSlice.text,
           childIndex: globalChildIndex,
           parentIndex,
+          location: this.computeLocation(text, cStart, cEnd, lineIndex, pages),
         });
         globalChildIndex++;
       }
@@ -277,7 +396,7 @@ export class ChunkingService {
       const endChildIndex = globalChildIndex - 1;
 
       parents.push({
-        text: parentText,
+        text: parentSlice.text,
         parentIndex,
         startChildIndex,
         endChildIndex: endChildIndex >= startChildIndex ? endChildIndex : startChildIndex,
@@ -287,47 +406,285 @@ export class ChunkingService {
     return { parents, children };
   }
 
-  /**
-   * Divide texto en fragmentos de tamaño máximo `maxChars`.
-   * Intenta cortar en líneas en blanco o saltos de línea para preservar párrafos.
-   */
-  private splitBySize(text: string, maxChars: number, mimeType?: string): string[] {
-    // Para PDFs usamos el splitter especializado y luego agrupamos hasta maxChars
-    if (mimeType && this.isPDF(mimeType)) {
-      const pdfFragments = this.splitPDF(text);
-      return this.groupFragments(pdfFragments, maxChars);
-    }
+  private computeLocation(
+    text: string,
+    start: number,
+    end: number,
+    lineIndex: number[],
+    pages?: PdfPage[]
+  ): ChunkLocation {
+    const clamp = (v: number) => Math.max(0, Math.min(text.length, v));
+    const s = clamp(start);
+    const e = clamp(end);
 
-    const paragraphs = text.split(/\n\s*\n/).map(p => p.trim()).filter(p => p.length > 0);
-    return this.groupFragments(paragraphs, maxChars);
+    const loc: ChunkLocation = { startChar: s, endChar: e };
+    loc.startLine = this.lineForOffset(lineIndex, s);
+    loc.endLine = this.lineForOffset(lineIndex, e);
+
+    if (pages && pages.length > 0) {
+      const found = this.locateInPages(pages, text.slice(s, e));
+      if (found) {
+        loc.pageNumber = found.pageNumber;
+        if (found.boundingBoxes) loc.boundingBoxes = found.boundingBoxes;
+      }
+    }
+    return loc;
   }
 
   /**
-   * Agrupa una lista de fragmentos en bloques de hasta `maxChars` caracteres.
+   * Recalcula la ubicación de un fragmento CONTRA EL TEXTO ORIGINAL (no el preparado).
+   * Recibe los offsets del fragmento en el texto preparado y el mapa que los traduce
+   * a offsets del texto original (producido por la estrategia). Así los números de
+   * línea / página / caja quedan siempre referidos al archivo que ve el usuario.
    */
-  private groupFragments(fragments: string[], maxChars: number): string[] {
-    const blocks: string[] = [];
-    let current: string[] = [];
-    let currentLen = 0;
+  public locateOnOriginal(
+    originalText: string,
+    pages: PdfPage[] | undefined,
+    preparedStart: number,
+    preparedEnd: number,
+    offsetMap: (i: number) => number
+  ): ChunkLocation {
+    const clamp = (v: number) => Math.max(0, Math.min(originalText.length, v));
+    const origStart = clamp(offsetMap(preparedStart));
+    const origEnd = clamp(offsetMap(preparedEnd));
 
-    for (const frag of fragments) {
-      if (currentLen + frag.length > maxChars && current.length > 0) {
-        blocks.push(current.join('\n\n').trim());
-        current = [];
-        currentLen = 0;
+    const loc: ChunkLocation = { startChar: origStart, endChar: origEnd };
+    const lineIndex = this.buildLineIndex(originalText);
+    loc.startLine = this.lineForOffset(lineIndex, origStart);
+    loc.endLine = this.lineForOffset(lineIndex, origEnd);
+
+    if (pages && pages.length > 0) {
+      const needle = originalText.slice(origStart, origEnd);
+      const found = this.locateInPages(pages, needle);
+      if (found) {
+        loc.pageNumber = found.pageNumber;
+        if (found.boundingBoxes) loc.boundingBoxes = found.boundingBoxes;
       }
-      // Si un solo fragmento es mayor que maxChars, lo corta duro
-      if (frag.length > maxChars) {
-        for (let i = 0; i < frag.length; i += maxChars) {
-          blocks.push(frag.slice(i, i + maxChars).trim());
-        }
-      } else {
-        current.push(frag);
-        currentLen += frag.length;
+    }
+    return loc;
+  }
+
+  private buildLineIndex(text: string): number[] {
+    const lines = [0];
+    for (let i = 0; i < text.length; i++) {
+      if (text.charCodeAt(i) === 10) lines.push(i + 1); // 0x0A '\n'
+    }
+    return lines;
+  }
+
+  private lineForOffset(lines: number[], offset: number): number {
+    let lo = 0;
+    let hi = lines.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if (lines[mid] <= offset) lo = mid;
+      else hi = mid - 1;
+    }
+    return lo + 1; // 1-indexed
+  }
+
+  private locateInPages(
+    pages: PdfPage[],
+    raw: string
+  ): { pageNumber: number; boundingBoxes?: BoundingBox[] } | undefined {
+    const needle = raw.trim();
+    if (!needle) return pages.length > 0 ? { pageNumber: pages[0].pageNumber } : undefined;
+
+    for (const page of pages) {
+      const idx = page.text.indexOf(needle);
+      if (idx >= 0) {
+        const boxes = this.unionRanges(page.ranges, idx, idx + needle.length);
+        return { pageNumber: page.pageNumber, boundingBoxes: boxes };
+      }
+      // Intento insensible a espacios/distribución de líneas (muy común cuando la
+      // estrategia limpió el texto: saltos de línea y espaciados difieren del PDF).
+      const norm = this.findNormalized(page.text, needle);
+      if (norm) {
+        const boxes = this.unionRanges(page.ranges, norm.start, norm.end);
+        return { pageNumber: page.pageNumber, boundingBoxes: boxes };
       }
     }
 
-    if (current.length > 0) blocks.push(current.join('\n\n').trim());
-    return blocks.filter(b => b.length > 0);
+    const firstLine = needle.split('\n')[0].trim();
+    if (firstLine) {
+      for (const page of pages) {
+        if (page.text.includes(firstLine)) return { pageNumber: page.pageNumber };
+      }
+    }
+    return pages.length > 0 ? { pageNumber: pages[0].pageNumber } : undefined;
+  }
+
+  /** Busca `needle` en `haystack` ignorando el espacio en blanco, devolviendo los
+   *  índices originales (en `haystack`) del rango encontrado. */
+  private findNormalized(haystack: string, needle: string): { start: number; end: number } | null {
+    const hIdx: number[] = [];
+    let h = '';
+    for (let i = 0; i < haystack.length; i++) {
+      if (!/\s/.test(haystack[i])) {
+        h += haystack[i];
+        hIdx.push(i);
+      }
+    }
+    const n = needle.replace(/\s+/g, '');
+    if (!n) return null;
+    const pos = h.indexOf(n);
+    if (pos < 0) return null;
+    const start = hIdx[pos] ?? 0;
+    const end = (hIdx[pos + n.length] ?? hIdx[hIdx.length - 1]) + 1;
+    return { start, end };
+  }
+
+  private unionRanges(ranges: PdfPage['ranges'], localStart: number, localEnd: number): BoundingBox[] | undefined {
+    // Agrupar los items del fragmento en filas (líneas) por solape vertical, de modo
+    // que el resaltado abrace cada línea de texto en lugar de un único rectángulo grande.
+    const matched = ranges
+      .filter(r => r.start < localEnd && r.end > localStart)
+      .map(r => r.item)
+      .sort((a, b) => a.y - b.y || a.x - b.x);
+
+    if (matched.length === 0) return undefined;
+
+    const OVERLAP = 0.4;
+    const rows: Array<{ minX: number; minY: number; maxX: number; maxY: number }> = [];
+    for (const it of matched) {
+      const top = it.y;
+      const bottom = it.y + it.height;
+      const row = rows.find(r => {
+        const overlap = Math.min(bottom, r.maxY) - Math.max(top, r.minY);
+        const minH = Math.min(bottom - top, r.maxY - r.minY);
+        return minH > 0 && overlap / minH > OVERLAP;
+      });
+      if (row) {
+        row.minX = Math.min(row.minX, it.x);
+        row.minY = Math.min(row.minY, it.y);
+        row.maxX = Math.max(row.maxX, it.x + it.width);
+        row.maxY = Math.max(row.maxY, it.y + it.height);
+      } else {
+        rows.push({ minX: it.x, minY: it.y, maxX: it.x + it.width, maxY: it.y + it.height });
+      }
+    }
+
+    rows.sort((a, b) => a.minY - b.minY);
+    return rows.map(r => ({ x: r.minX, y: r.minY, width: r.maxX - r.minX, height: r.maxY - r.minY }));
+  }
+
+  /**
+   * Divide texto en fragmentos de tamaño máximo `maxChars` preservando los
+   * offsets sobre el texto de entrada. Devuelve los fragmentos como sub-rebanadas.
+   */
+  private splitSlices(
+    text: string,
+    maxChars: number,
+    mimeType?: string
+  ): Array<{ text: string; start: number }> {
+    if (mimeType && this.isPDF(mimeType)) {
+      // Para PDFs usamos el splitter especializado (los offsets son aproximados;
+      // la ubicación precisa se resuelve luego contra las páginas por contenido).
+      const pdfFragments = this.splitPDF(text);
+      const slices: Array<{ text: string; start: number }> = [];
+      let offset = 0;
+      const block = this.groupBlocks(pdfFragments.map(f => ({ text: f, start: 0, end: f.length })), maxChars);
+      for (const b of block) {
+        slices.push({ text: b.text, start: offset });
+        offset += b.text.length + PAGE_SEP.length;
+      }
+      return slices;
+    }
+
+    const blocks = this.splitByBlankLines(text);
+    return this.groupBlocks(blocks, maxChars);
+  }
+
+  /** Divide por líneas en blanco devolviendo párrafos junto a sus offsets originales. */
+  private splitByBlankLines(text: string): Array<{ text: string; start: number; end: number }> {
+    const out: Array<{ text: string; start: number; end: number }> = [];
+    const re = /\n[ \t]*\n+/g;
+    let segStart = 0;
+    let m: RegExpExecArray | null;
+
+    const push = (start: number, end: number) => {
+      const seg = text.slice(start, end);
+      const trimmed = seg.replace(/[ \t]+\n?$/, '').trimEnd();
+      if (trimmed.length > 0) out.push({ text: trimmed, start, end: start + trimmed.length });
+    };
+
+    while ((m = re.exec(text))) {
+      push(segStart, m.index);
+      segStart = re.lastIndex;
+    }
+    push(segStart, text.length);
+    return out;
+  }
+
+  /**
+   * Divide un bloque excesivamente largo en trozos de hasta `maxChars` sin partir
+   * palabras ni frases: corta primero en el último salto de línea, luego en el
+   * último final de frase y, si la línea es muy larga, en el último espacio.
+   */
+  private sliceOversized(text: string, maxChars: number): Array<{ text: string; start: number; end: number }> {
+    const out: Array<{ text: string; start: number; end: number }> = [];
+    let start = 0;
+
+    const cutPoint = (from: number, limit: number): number => {
+      if (limit >= text.length) return text.length;
+      const windowText = text.slice(from, limit);
+
+      let idx = windowText.lastIndexOf('\n');
+      if (idx > 0) return from + idx;
+
+      idx = windowText.search(/[.;:!?](?:\s|$)/g);
+      if (idx >= 0) return from + idx + 1;
+
+      idx = windowText.lastIndexOf(' ');
+      if (idx > 0) return from + idx;
+
+      return limit;
+    };
+
+    while (start < text.length) {
+      let end = cutPoint(start, start + maxChars);
+      if (end <= start) end = Math.min(start + maxChars, text.length);
+      const segment = text.slice(start, end).trim();
+      if (segment.length > 0) out.push({ text: segment, start, end });
+      start = end;
+    }
+    return out;
+  }
+
+  /** Agrupa párrafos en bloques de hasta `maxChars`, con offsets (start/end) del texto original. */
+  private groupBlocks(
+    blocks: Array<{ text: string; start: number; end: number }>,
+    maxChars: number
+  ): Array<{ text: string; start: number; end: number }> {
+    const groups: Array<{ text: string; start: number; end: number }> = [];
+    let current: Array<{ text: string; start: number; end: number }> = [];
+    let currentLen = 0;
+
+    const flush = () => {
+      if (current.length === 0) return;
+      const text = current.map(b => b.text).join(PAGE_SEP);
+      groups.push({ text, start: current[0].start, end: current[current.length - 1].end });
+      current = [];
+      currentLen = 0;
+    };
+
+    for (const b of blocks) {
+      const sepLen = current.length > 0 ? PAGE_SEP.length : 0;
+      if (current.length > 0 && currentLen + sepLen + b.text.length > maxChars) flush();
+
+      if (b.text.length > maxChars) {
+        flush();
+        const pieces = this.sliceOversized(b.text, maxChars);
+        for (const piece of pieces) {
+          groups.push({ text: piece.text, start: b.start + piece.start, end: b.start + piece.end });
+        }
+        continue;
+      }
+
+      current.push(b);
+      currentLen += currentLen === 0 ? b.text.length : sepLen + b.text.length;
+    }
+    flush();
+    return groups;
   }
 }

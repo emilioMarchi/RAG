@@ -58,6 +58,10 @@ export interface ChunkLocation {
   startLine?: number;
   endLine?: number;
   boundingBoxes?: BoundingBox[];
+  /** Fase 5: rango útil SIN overlap (núcleo del chunk). Presente cuando el fragmento
+   *  fue ampliado hacia atrás por overlap; el visor resalta este rango por defecto. */
+  coreStartChar?: number;
+  coreEndChar?: number;
 }
 
 /** Ítem de la capa de texto de un PDF con su caja delimitadora normalizada */

@@ -250,10 +250,22 @@ export function splitWithStrategy(
     const extEnd = loc.endChar;
     const textWithOverlap = overlapChars > 0 ? prepared.text.slice(extStart, extEnd) : ch.text;
 
+    const located = chunker.locateOnOriginal(text, opts.pages, extStart, extEnd, prepared.index);
+
+    // Fase 5 — Rango core vs extended: registrar también el rango útil del chunk SIN
+    // overlap (en el texto original) para que el visor resalte el núcleo por defecto.
+    if (overlapChars > 0) {
+      const core = chunker.locateOnOriginal(text, opts.pages, loc.startChar, loc.endChar, prepared.index);
+      if (core.startChar != null && core.endChar != null) {
+        located.coreStartChar = core.startChar;
+        located.coreEndChar = core.endChar;
+      }
+    }
+
     return {
       ...ch,
       text: textWithOverlap,
-      location: chunker.locateOnOriginal(text, opts.pages, extStart, extEnd, prepared.index),
+      location: located,
     };
   });
 

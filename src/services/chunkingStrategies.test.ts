@@ -128,4 +128,23 @@ describe('splitWithStrategy', () => {
     expect(loc).toBeDefined()
     expect(loc!.startChar!).toBeGreaterThanOrEqual(0)
   })
+
+  it('registra rango core (sin overlap) vs extended cuando overlapChars > 0', () => {
+    const generic = new GenericChunkingStrategy()
+    const text = 'palabra '.repeat(120)
+
+    const withOverlap = splitWithStrategy(c, text, generic, { childMinChars: 1, overlapChars: 40 })
+    const b = withOverlap.children[1]
+    const loc = b.location
+
+    expect(loc).toBeDefined()
+    expect(loc!.coreStartChar).toBeDefined()
+    expect(loc!.coreEndChar).toBeDefined()
+    // El núcleo NO incluye el overlap: empieza después del rango ampliado
+    expect(loc!.coreStartChar!).toBeGreaterThanOrEqual(loc!.startChar!)
+    expect(loc!.coreEndChar!).toBeLessThanOrEqual(loc!.endChar!)
+    // El rango core apunta al fragmento real del chunk (b.text) descontado el prefijo
+    const coreSlice = text.slice(loc!.coreStartChar!, loc!.coreEndChar!)
+    expect(b.text.endsWith(coreSlice)).toBe(true)
+  })
 })

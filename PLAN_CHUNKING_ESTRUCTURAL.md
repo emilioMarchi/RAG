@@ -19,14 +19,14 @@ Las fases marcadas con ✅ ya están implementadas; el resto es desarrollo pendi
 
 ```mermaid
 graph TD
-    F0[Fase 0: Sanitizacion layout PDF<br/>(header/footer stripping)] --> F1
+    F0[Fase 0: Sanitizacion layout PDF ✅] --> F1
     F1[Fase 1: Detector de fronteras ✅] --> F2
     F2[Fase 2: Split estructural ✅] --> F3[Fase 3: Overlap ✅]
     F2 --> F4[Fase 4: Parent-child + dedup grafo ✅]
-    F3 --> F5[Fase 5: Rango core vs extended <br/>en location]
-    F4 --> F6[Fase 6: Contexto normativo (AST)]
-    F5 --> F7[Fase 7: Hook adaptativo por densidad]
-    F6 --> F8[Fase 8: Evaluacion empirica]
+    F3 --> F5[Fase 5: Rango core vs extended ✅]
+    F4 --> F6[Fase 6: Contexto normativo (AST) ✅]
+    F5 --> F7[Fase 7: Hook adaptativo por densidad ⏳]
+    F6 --> F8[Fase 8: Evaluacion empirica ⏳]
 ```
 
 ---
@@ -110,7 +110,7 @@ cambia este shape, solo quién llena `startChar/endChar/startLine/endLine`.
 
 ---
 
-## Fase 0 — Sanitización de layout PDF (header/footer stripping) ⏳ pendiente
+## Fase 0 — Sanitización de layout PDF (header/footer stripping) ✅
 
 **Origen:** recomendación del análisis técnico (contaminación por headers/footers y
 números de página intermedios: "Boletín Oficial N° 34.120 - Página 12"). Un ARTÍCULO que
@@ -192,7 +192,7 @@ Hoy `splitHierarchical` hace parent (bloques grandes) → child (sub-bloques). R
 
 ---
 
-## Fase 5 — Rango core vs extended en `location` ⏳ pendiente
+## Fase 5 — Rango core vs extended en `location` ✅
 
 **Origen:** recomendación del análisis técnico (overlap). Al solapar, los caracteres finales
 del Child *N* coinciden con los iniciales del *N+1*; al saltar desde una entidad en la zona
@@ -206,7 +206,7 @@ de overlap, `locateInPages`/`spansToBoxes` del visor podrían resaltar el bloque
 
 ---
 
-## Fase 6 — Contexto normativo (AST / jerarquía) ⏳ pendiente
+## Fase 6 — Contexto normativo (AST / jerarquía) ✅
 
 **Origen:** recomendación del análisis técnico (Gap Crítico Legal). Los documentos legales
 son árboles `Título → Capítulo → Sección → Artículo → Inciso/Numeral → Párrafo`, pero el
@@ -247,9 +247,9 @@ La partición óptima se mide, no se asume:
 - [ ] `location` sigue calculándose sobre el **texto original** y no desalinea el visor (mantener `locateOnOriginal`).
 - [ ] Backward-compat: sin cambiar configs, la salida es equivalente a la actual (salvo el corte en fronteras).
 - [ ] Tests unitarios de `detectBoundaries`, `splitStructural`, overlap y adaptativo; suite del repo en verde salvo las 4 fallas preexistentes de mocks DB.
-- [ ] (F0) PDF sin headers/footers intermedios rompiendo las fronteras.
-- [ ] (F5) `location` diferencia `core` vs `extended`; el visor usa `core` por defecto.
-- [ ] (F6) cada child de normativa es enriquecido con su encabezado jerárquico (AST).
+- [ ] (F0) PDF sin headers/footers intermedios rompiendo las fronteras. ✅
+- [ ] (F5) `location` diferencia `core` vs `extended`; el visor usa `core` por defecto. ✅
+- [ ] (F6) cada child de normativa es enriquecido con su encabezado jerárquico (AST). ✅
 
 ---
 
@@ -263,7 +263,7 @@ La partición óptima se mide, no se asume:
 - **Re-ingesta**: los documentos ya subidos no tienen `location`; el split estructural no los arregla de forma retroactiva (re-ingest).
 - **Orden**: fronteras primero (F0-2), luego overlap (F3) y parent-child+dedup (F4), luego rango core (F5), contexto normativo (F6); adaptativo (F7) y evaluación (F8) pueden ir después, sin bloquear las anteriores.
 
-_Nota: Fase 1 a 4 implementadas. Las fases 0, 5, 6, 7 y 8 son desarrollo pendiente en este único plan._
+_Nota: Fase 0 a 6 implementadas. Las fases 7 (adaptativo, opcional) y 8 (evaluación) son el desarrollo pendiente restante de este único plan._
 
 
 🚀 Hoja de Ruta de Ejecución Inmediata (orden único integrado — Sprint 1 a 3 ✅ completos)
@@ -283,7 +283,7 @@ Reutilizar regexes existentes:Reutilizar NUM_LINE_RE de strategyDetector.ts (num
   opts?: { minChars?: number }
 ): Array<{ text: string; start: number; end: number }> { ... }
 Lógica de agrupación/corte:Recorrer los marcadores de detectBoundaries(text).  Acumular bloques de texto mientras la suma de longitud sea ≤ maxChars.  Si un único bloque (ej. un Artículo gigante) supera maxChars, aplicar fallback a oraciones/puntos seguidos (sliceOversized existente).  Compatibilidad: Hacer que splitSlices() consuma splitStructural() manteniendo la firma hacia splitHierarchical().  Sprint 3: Fases 3 y 4 — Overlap y Parent-ChildObjetivo: Preservar contexto en cortes y mantener sincronizado el visor.Agregar overlapChars en StrategySplittingOptions (src/services/chunkingStrategies.ts).  Aplicar Overlap sobre texto preparado: Ampliar los límites start del child $n$ hacia atrás $n-1$.  Garantizar el recálculo contra el original: Asegurar que cada child pase por locateOnOriginal(originalText, pages, preparedStart, preparedEnd, prepared.index).  Metadatos de Grafo (Preventivo): En ingestionPipeline.ts, aplicar un Set simple de deduplicación de entidades por (entity_name, entity_type) al recorrer los hijos con overlap para no duplicar nodos en la base de datos de grafos.🛠️ Recordatorio Técnico para el ComienzoTexto preparado vs. Original: Recuerda que la limpieza previa (como LegalNorm.prepare()) altera la longitud del texto. detectBoundaries y splitStructural deben correr sobre el texto preparado. Luego, locateOnOriginal traducirá automáticamente las coordenadas al PDF/documento original.  MDTests del repo: La suite preexistente debe seguir en verde.  
-Sprint 4 [Fase 0]: Sanitización de layout PDF (header/footer stripping) en extractPDFPages/buildPage, descartando líneas repetidas de encabezado/pie sin romper items/ranges.
-Sprint 5 [Fase 5]: Rango core vs extended en ChunkLocation al aplicar overlap; el visor resalta core por defecto.
-Sprint 6 [Fase 6]: AST normativo sobre detectBoundaries + header sintético en enrichChunk para normativas.
-Sprint 7 [Fases 7-8]: Hook adaptativo por densidad (sizeFor) y evaluación empírica (recall@k / cobertura).  
+Sprint 4 [Fase 0] ✅: Sanitización de layout PDF (header/footer stripping) en extractPDFPages/buildPage, descartando líneas repetidas de encabezado/pie sin romper items/ranges.
+Sprint 5 [Fase 5] ✅: Rango core vs extended en ChunkLocation al aplicar overlap; el visor resalta core por defecto.
+Sprint 6 [Fase 6] ✅: AST normativo sobre detectBoundaries + header sintético en enrichChunk para normativas.
+Sprint 7 [Fases 7-8] ⏳: Hook adaptativo por densidad (sizeFor) y evaluación empírica (recall@k / cobertura).  

@@ -12,13 +12,21 @@ Mejora del pipeline de fragmentación para que los cortes ocurran **en las front
 
 ## 🗺️ Mapa de ruta
 
+Plantea un pipeline de fragmentación estructura-aware. Este es el **único** roadmap del
+proyecto: las recomendaciones del análisis técnico (sanitización de layout, jerarquía
+normativa, rango core vs extended, rendimiento) quedaron integradas como fases numeradas.
+Las fases marcadas con ✅ ya están implementadas; el resto es desarrollo pendiente en orden.
+
 ```mermaid
 graph TD
-    A[Fase 1: Detector de fronteras] --> B[Fase 2: Split estructural]
-    B --> C[Fase 3: Overlap entre chunks]
-    B --> D[Fase 4: Parent-child sobre bordes]
-    D --> E[Fase 5: Hook adaptativo por densidad]
-    E --> F[Fase 6: Evaluación empírica]
+    F0[Fase 0: Sanitizacion layout PDF<br/>(header/footer stripping)] --> F1
+    F1[Fase 1: Detector de fronteras ✅] --> F2
+    F2[Fase 2: Split estructural ✅] --> F3[Fase 3: Overlap ✅]
+    F2 --> F4[Fase 4: Parent-child + dedup grafo ✅]
+    F3 --> F5[Fase 5: Rango core vs extended <br/>en location]
+    F4 --> F6[Fase 6: Contexto normativo (AST)]
+    F5 --> F7[Fase 7: Hook adaptativo por densidad]
+    F6 --> F8[Fase 8: Evaluacion empirica]
 ```
 
 ---
@@ -102,7 +110,22 @@ cambia este shape, solo quién llena `startChar/endChar/startLine/endLine`.
 
 ---
 
-## Fase 1 — Detector de fronteras (boundary detection)
+## Fase 0 — Sanitización de layout PDF (header/footer stripping) ⏳ pendiente
+
+**Origen:** recomendación del análisis técnico (contaminación por headers/footers y
+números de página intermedios: "Boletín Oficial N° 34.120 - Página 12"). Un ARTÍCULO que
+empieza al final de la página 3 y continúa en la 4 introduce texto espurio en el medio,
+rompe los regex de fronteras o fragmenta erróneamente el artículo.
+
+- Aplicar en `extractPDFPages`/`buildPage` (`chunkingService.ts:215/250`) **antes** del
+  split: detectar líneas repetidas en cada página (headers/footers) y descartarlas.
+- Mantener la sincronía con `ranges`/`items` (los offsets deben seguir apuntando al texto
+  que ve el usuario).
+- **Prioridad:** junto con la Fase 6, es la más señalada por el análisis para normativas.
+
+---
+
+## Fase 1 — Detector de fronteras (boundary detection) ✅
 
 Nuevo módulo reutilizable por estrategia (resuelve límites como *lista de offsets*, igual que `splitByBlankLines` pero multi-señal). Debe ser **común** a todos los tipos de documento. Ubicación propuesta por el roadmap de ejecución: **`src/services/chunking/boundaryDetector.ts`** (módulo aislado y unit-testable).
 
@@ -169,7 +192,35 @@ Hoy `splitHierarchical` hace parent (bloques grandes) → child (sub-bloques). R
 
 ---
 
-## Fase 5 — Hook adaptativo por densidad (opcional)
+## Fase 5 — Rango core vs extended en `location` ⏳ pendiente
+
+**Origen:** recomendación del análisis técnico (overlap). Al solapar, los caracteres finales
+del Child *N* coinciden con los iniciales del *N+1*; al saltar desde una entidad en la zona
+de overlap, `locateInPages`/`spansToBoxes` del visor podrían resaltar el bloque equivocado.
+
+- Enriquecer `ChunkLocation` para conservar el rango útil **sin** overlap
+  (`coreStartChar/coreEndChar`) además del ampliado con overlap (`extendedStartChar/endChar`).
+- En `splitWithStrategy`, al aplicar `overlapChars`, llenar ambos rangos; el visor resalta
+  por defecto el `core`, y solo usa el `extended` cuando el texto objetivo cae en solape.
+- Shape compatible con `metadata.location` (agrega campos opcionales; no rompe migración 006).
+
+---
+
+## Fase 6 — Contexto normativo (AST / jerarquía) ⏳ pendiente
+
+**Origen:** recomendación del análisis técnico (Gap Crítico Legal). Los documentos legales
+son árboles `Título → Capítulo → Sección → Artículo → Inciso/Numeral → Párrafo`, pero el
+detector produce límites **planos**. Un hijo que corta en el Inciso *b)* pierde el dato de a
+qué ARTÍCULO/Capítulo pertenece si ese contexto no se propaga.
+
+- Construir un AST normativo corto a partir de `detectBoundaries` (encabezados y numeración
+  jerárquica) y, al enriquecer, anteponer un header sintético al child
+  (`[Ley 27.541 > Título II > Art. 14 > Inciso b]`) antes de pasarlo a `LLM.enrichChunk`.
+- No cambia el chunking; agrega contexto al texto que se vectoriza/consulta.
+
+---
+
+## Fase 7 — Hook adaptativo por densidad ⏳ pendiente (opcional)
 
 Para no duplicar lógica por estrategia, exponer un `sizeFor(segment)` opcional en `ChunkingStrategyConfig`:
 
@@ -179,7 +230,7 @@ Para no duplicar lógica por estrategia, exponer un `sizeFor(segment)` opcional 
 
 ---
 
-## Fase 6 — Evaluación empírica
+## Fase 8 — Evaluación empírica ⏳ pendiente
 
 La partición óptima se mide, no se asume:
 - Métrica de recuperación (recall@k de `hybridSearchService`) con y sin cada cambio (baseline fijo vs. estructural vs. overlap vs. adaptativo).
@@ -196,6 +247,9 @@ La partición óptima se mide, no se asume:
 - [ ] `location` sigue calculándose sobre el **texto original** y no desalinea el visor (mantener `locateOnOriginal`).
 - [ ] Backward-compat: sin cambiar configs, la salida es equivalente a la actual (salvo el corte en fronteras).
 - [ ] Tests unitarios de `detectBoundaries`, `splitStructural`, overlap y adaptativo; suite del repo en verde salvo las 4 fallas preexistentes de mocks DB.
+- [ ] (F0) PDF sin headers/footers intermedios rompiendo las fronteras.
+- [ ] (F5) `location` diferencia `core` vs `extended`; el visor usa `core` por defecto.
+- [ ] (F6) cada child de normativa es enriquecido con su encabezado jerárquico (AST).
 
 ---
 
@@ -207,12 +261,12 @@ La partición óptima se mide, no se asume:
 - **PDFs OCR sin layout**: el split por "frontera de página" solo aporta bbox en PDFs con capa de texto; en PDFs escaneados (`extractPDFPagesWithOCR`) no hay `items/ranges`, así que `boundingBoxes` no estará disponible (solo `pageNumber`). No exigir bbox ahí.
 - **Compatibilidad de ubicación**: preserve `locateOnOriginal` y el `PreparedText.index` de cada estrategia; romper ese mapa rompe la navegación grafo→documento.
 - **Re-ingesta**: los documentos ya subidos no tienen `location`; el split estructural no los arregla de forma retroactiva (re-ingest).
-- **Orden**: fronteras primero (F1-2), luego overlap (F3) y parent-child (F4); el adaptativo (F5) y la evaluación (F6) pueden ir después, sin bloquear las anteriores.
+- **Orden**: fronteras primero (F0-2), luego overlap (F3) y parent-child+dedup (F4), luego rango core (F5), contexto normativo (F6); adaptativo (F7) y evaluación (F8) pueden ir después, sin bloquear las anteriores.
 
-_Nota: este documento es el plan a futuro; no se implementó todavía._
+_Nota: Fase 1 a 4 implementadas. Las fases 0, 5, 6, 7 y 8 son desarrollo pendiente en este único plan._
 
 
-🚀 Hoja de Ruta de Ejecución Inmediata[Sprint 1: Fase 1] ──► [Sprint 2: Fase 2] ──► [Sprint 3: Fases 3 y 4]
+🚀 Hoja de Ruta de Ejecución Inmediata (orden único integrado — Sprint 1 a 3 ✅ completos)
  Boundary Detector      Split Estructural       Overlap + Parent-Child
  (Módulo aislado)       (ChunkingService)       (splitWithStrategy + Visor)
 Sprint 1: Fase 1 — Detector de Fronteras (boundaryDetector.ts)Objetivo: Un módulo puro, aislado y fácil de probar con unit tests.Crear archivo: src/services/chunking/boundaryDetector.ts.  Definir la interfaz y función principal:TypeScriptexport interface BoundaryMatch {
@@ -229,3 +283,7 @@ Reutilizar regexes existentes:Reutilizar NUM_LINE_RE de strategyDetector.ts (num
   opts?: { minChars?: number }
 ): Array<{ text: string; start: number; end: number }> { ... }
 Lógica de agrupación/corte:Recorrer los marcadores de detectBoundaries(text).  Acumular bloques de texto mientras la suma de longitud sea ≤ maxChars.  Si un único bloque (ej. un Artículo gigante) supera maxChars, aplicar fallback a oraciones/puntos seguidos (sliceOversized existente).  Compatibilidad: Hacer que splitSlices() consuma splitStructural() manteniendo la firma hacia splitHierarchical().  Sprint 3: Fases 3 y 4 — Overlap y Parent-ChildObjetivo: Preservar contexto en cortes y mantener sincronizado el visor.Agregar overlapChars en StrategySplittingOptions (src/services/chunkingStrategies.ts).  Aplicar Overlap sobre texto preparado: Ampliar los límites start del child $n$ hacia atrás $n-1$.  Garantizar el recálculo contra el original: Asegurar que cada child pase por locateOnOriginal(originalText, pages, preparedStart, preparedEnd, prepared.index).  Metadatos de Grafo (Preventivo): En ingestionPipeline.ts, aplicar un Set simple de deduplicación de entidades por (entity_name, entity_type) al recorrer los hijos con overlap para no duplicar nodos en la base de datos de grafos.🛠️ Recordatorio Técnico para el ComienzoTexto preparado vs. Original: Recuerda que la limpieza previa (como LegalNorm.prepare()) altera la longitud del texto. detectBoundaries y splitStructural deben correr sobre el texto preparado. Luego, locateOnOriginal traducirá automáticamente las coordenadas al PDF/documento original.  MDTests del repo: La suite preexistente debe seguir en verde.  
+Sprint 4 [Fase 0]: Sanitización de layout PDF (header/footer stripping) en extractPDFPages/buildPage, descartando líneas repetidas de encabezado/pie sin romper items/ranges.
+Sprint 5 [Fase 5]: Rango core vs extended en ChunkLocation al aplicar overlap; el visor resalta core por defecto.
+Sprint 6 [Fase 6]: AST normativo sobre detectBoundaries + header sintético en enrichChunk para normativas.
+Sprint 7 [Fases 7-8]: Hook adaptativo por densidad (sizeFor) y evaluación empírica (recall@k / cobertura).  

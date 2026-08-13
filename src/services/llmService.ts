@@ -23,7 +23,7 @@ export class LLMService {
     );
   }
 
-  private async complete(
+  async complete(
     params: Omit<OpenAI.Chat.ChatCompletionCreateParams, 'model'>
   ): Promise<OpenAI.Chat.Completions.ChatCompletion> {
     let lastError: unknown;

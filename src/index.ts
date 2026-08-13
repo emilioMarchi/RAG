@@ -11,6 +11,8 @@ import { HierarchicalRAGModule } from './services/ragEngine.js';
 import { IterativeRAGEngine } from './services/iterativeRAGEngine.js';
 import { createDocumentRouter } from './routes/documents.js';
 import { createQueryRouter } from './routes/query.js';
+import { AgentService } from './agent/agentService.js';
+import { createAgentRouter } from './routes/agent.js';
 
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -33,9 +35,11 @@ const chunker = new ChunkingService();
 const pipeline = new IngestionPipeline(embedder, llm, storage);
 const rag = new HierarchicalRAGModule(embedder, llm);
 const iterativeRag = new IterativeRAGEngine(embedder, llm);
+const agentService = new AgentService(llm, iterativeRag);
 
 app.use('/api', createDocumentRouter(pipeline, chunker, storage));
 app.use('/api', createQueryRouter(rag, iterativeRag, llm));
+app.use('/api', createAgentRouter(agentService));
 
 app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });

@@ -897,10 +897,64 @@ window.searchGraphForText = function (text) {
 };
 
 // ─── Chat ─────────────────────────────────────────────────────────────────────
+let sessionId = localStorage.getItem('rag_session_id');
+if (!sessionId) {
+  sessionId = 'session_' + Math.random().toString(36).substring(2, 15) + '_' + Date.now();
+  localStorage.setItem('rag_session_id', sessionId);
+}
+
+async function loadAgentHistory() {
+  try {
+    const history = await api(`/api/agent/history?sessionId=${sessionId}`);
+    const chatMessages = history.filter(m => m.role === 'user' || m.role === 'assistant');
+    if (chatMessages.length > 0) {
+      const welcome = chatMsgs.querySelector('.chat-welcome');
+      if (welcome) welcome.remove();
+
+      chatMessages.forEach(msg => {
+        appendMsg(msg.role, msg.content);
+      });
+    }
+  } catch (e) {
+    console.error('Error al cargar el historial del agente:', e);
+  }
+}
+loadAgentHistory();
+
 btnSend.addEventListener('click', sendChat);
 chatInput.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChat(); }
 });
+
+const btnResetChat = document.getElementById('btn-reset-chat');
+if (btnResetChat) {
+  btnResetChat.addEventListener('click', async () => {
+    if (!confirm('¿Estás seguro de que deseas iniciar una nueva conversación? Se borrará el historial.')) return;
+    try {
+      await api('/api/agent/reset', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId }),
+      });
+      
+      // Limpiar UI e insertar pantalla de bienvenida
+      chatMsgs.innerHTML = `
+        <div class="chat-welcome">
+          <div class="chat-welcome-icon">⬡</div>
+          <h3>RAG Studio</h3>
+          <p>Hacé preguntas sobre tus documentos cargados.</p>
+          <div class="chat-welcome-hints" id="chat-hints">
+            <button class="hint-chip" data-hint="¿De qué tratan los documentos cargados?">📄 ¿De qué tratan los documentos?</button>
+            <button class="hint-chip" data-hint="Resume los temas principales de la base de conocimiento.">📝 Resumen de la base de conocimiento</button>
+            <button class="hint-chip" data-hint="¿Qué información específica puedo encontrar aquí?">🔍 ¿Qué información hay disponible?</button>
+            <button class="hint-chip" data-hint="¿Cuáles son los conceptos más importantes mencionados?">💡 Conceptos más importantes</button>
+          </div>
+        </div>`;
+    } catch (e) {
+      alert('Error al reiniciar la conversación: ' + e.message);
+    }
+  });
+}
 
 const chatMsgsContainer = document.getElementById('chat-messages');
 if (chatMsgsContainer) {
@@ -942,12 +996,10 @@ async function sendChat() {
   const loadingEl = appendMsg('assistant', '…', true);
 
   try {
-    const threshold = chatThresholdSlider ? parseFloat(chatThresholdSlider.value) / 100 : 0;
-    
-    const result = await api('/api/query/iterative', {
+    const result = await api('/api/agent/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query: q, topDocs: 5, topParagraphs: 10, similarityThreshold: threshold }),
+      body: JSON.stringify({ query: q, sessionId }),
     });
 
     loadingEl.querySelector('.chat-bubble').innerHTML = renderAnswer(result.answer, buildCitationLabels(result.sources));

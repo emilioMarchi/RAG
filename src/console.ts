@@ -84,7 +84,6 @@ async function ingestFile(filePath: string) {
       fileName,
       mimeType,
       fullContentText,
-      paragraphs,
     });
 
     console.log(`  ✓ Ingestado: ${result.docId} (${result.childChunksStored} fragmentos, ${result.parentChunksStored} bloques contextuales)`);

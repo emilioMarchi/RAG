@@ -94,15 +94,18 @@ export function createQueryRouter(
       // Embed con dimensión high (1536d) para comparar con los fragmentos
       const highVector = await embedder.generateEmbedding(userQuery.trim(), 1536);
 
-      // Calculamos la similitud coseno (1 - distancia coseno) para todos los párrafos
-      // pgvector: <=> devuelve distancia coseno (0 = idénticos, 2 = opuestos)
-      // score = 1 - distancia/2  → rango 0-1
+      // Calculamos la similitud coseno (1 - distancia coseno) para los párrafos más
+      // similares. pgvector: <=> devuelve distancia coseno (0 = idénticos, 2 = opuestos);
+      // score = 1 - distancia/2 → rango 0-1. Ordenamos por el operador de distancia
+      // directo y con LIMIT para que el planificador use el índice HNSW.
+      const LIMIT_SCORES = 1000;
       const result = await query<{ id: string; score: number }>(
         `SELECT id,
                 GREATEST(0, 1 - (embedding_high <=> $1::vector) / 2) AS score
          FROM document_paragraphs
-         ORDER BY score DESC`,
-        [JSON.stringify(highVector)]
+         ORDER BY embedding_high <=> $1::vector
+         LIMIT $2`,
+        [JSON.stringify(highVector), LIMIT_SCORES]
       );
 
       res.json({ scores: result.rows.map(r => ({ paragraph_id: r.id, score: Number(r.score) })) });
@@ -256,15 +259,18 @@ export function createQueryRouter(
       const simThreshold = typeof threshold === 'number' ? threshold : 0.75;
 
       const result = await query<{ source_id: string; target_id: string; similarity: number }>(
-        `SELECT 
+        `WITH subset AS MATERIALIZED (
+            SELECT id, embedding_high
+            FROM document_paragraphs
+            WHERE id = ANY($1::uuid[])
+         )
+         SELECT
             p1.id as source_id,
             p2.id as target_id,
             (1 - (p1.embedding_high <=> p2.embedding_high)) as similarity
-         FROM document_paragraphs p1
-         CROSS JOIN document_paragraphs p2
-         WHERE p1.id = ANY($1::uuid[]) 
-           AND p2.id = ANY($1::uuid[])
-           AND p1.id < p2.id -- Evita duplicados y autorelaciones
+         FROM subset p1
+         CROSS JOIN subset p2
+         WHERE p1.id < p2.id -- Evita duplicados y autorelaciones
            AND (1 - (p1.embedding_high <=> p2.embedding_high)) >= $2
          ORDER BY similarity DESC`,
         [paragraphIds, simThreshold]

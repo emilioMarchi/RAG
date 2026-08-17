@@ -32,4 +32,25 @@ export const env = {
   R2_BUCKET_NAME: optional('R2_BUCKET_NAME'),
   R2_PUBLIC_DOMAIN: process.env.R2_PUBLIC_DOMAIN || null,
   PORT: parseInt(process.env.PORT || '3000', 10),
+
+  // RAG iterativo (motor compartido por /api/query/iterative y el agente)
+  RAG_MAX_ITERATIONS: parseInt(process.env.RAG_MAX_ITERATIONS || '4', 10),
+  RAG_ENABLE_RERANKING: (process.env.RAG_ENABLE_RERANKING ?? 'true') === 'true',
+  RAG_ENABLE_CRAG: (process.env.RAG_ENABLE_CRAG ?? 'true') === 'true',
+
+  // Agente conversacional
+  AGENT_MAX_TURNS: parseInt(process.env.AGENT_MAX_TURNS || '10', 10),
+  AGENT_TOP_DOCS: parseInt(process.env.AGENT_TOP_DOCS || '5', 10),
+  AGENT_TOP_PARAGRAPHS: parseInt(process.env.AGENT_TOP_PARAGRAPHS || '10', 10),
+
+  // Ingesta de documentos
+  // Reducir si el LLM usado es de plan free (OpenRouter free tier limita RPM muy bajo)
+  INGESTION_CONCURRENCY: parseInt(process.env.INGESTION_CONCURRENCY || '2', 10),
+  // Graph RAG: extracción de entidades/relaciones con el LLM.
+  // Desactivado por defecto: el grafo aún no tiene consumidores reales (solo se escribe).
+  // Reactivar cuando se implemente un endpoint/vista que lo lea.
+  INGESTION_ENABLE_GRAPH_RAG: (process.env.INGESTION_ENABLE_GRAPH_RAG ?? 'false') === 'true',
+  // Enriquecimiento determinista: construir el contexto (contextualized_text) sin llamar al LLM.
+  // Si es false, vuelve al flujo anterior con llm.enrichChunk (más caro y lento).
+  INGESTION_DETERMINISTIC_ENRICH: (process.env.INGESTION_DETERMINISTIC_ENRICH ?? 'true') === 'true',
 } as const;

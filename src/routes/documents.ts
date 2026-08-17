@@ -32,6 +32,8 @@ export function createDocumentRouter(
         fileType: req.body.fileType,
         fileExtension: req.file.originalname.includes('.') ? req.file.originalname.slice(req.file.originalname.lastIndexOf('.')) : '',
         mimeType,
+        overlapChars: typeof req.body.overlapChars === 'number' ? req.body.overlapChars : undefined,
+        adaptive: req.body.adaptive === true || req.body.adaptive === 'true',
       };
 
       const tempPath = `temp_${Date.now()}_${req.file.originalname}`;
@@ -63,7 +65,6 @@ export function createDocumentRouter(
         mimeType,
         fullContentText,
         pages,
-        paragraphs,
         chunkingMetadata,
       });
 

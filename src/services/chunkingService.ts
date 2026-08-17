@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { detectBoundaries } from './chunking/boundaryDetector.js';
+import { detectBoundaries, BoundaryKind } from './chunking/boundaryDetector.js';
 
 interface PdfTextItemLike {
   str?: string;
@@ -91,6 +91,9 @@ export interface ChildChunk {
   location?: ChunkLocation;
   /** Fase 6: header jerárquico normativo (ej. "LEY 27.541 > TITULO II > ARTICULO 14"). */
   contextPath?: string;
+  /** Fase 3/B: texto del fragmento CON overlap, usado SOLO para enriquecer/vectorizar.
+   *  `text` (y `location`) se mantienen como el NÚCLEO sin solape para el visor. */
+  extendedText?: string;
 }
 
 export interface ParentChunk {
@@ -481,9 +484,12 @@ export class ChunkingService {
     parentSlices.forEach((parentSlice, parentIndex) => {
       const startChildIndex = globalChildIndex;
 
-      // 2. Dividir cada parent en children más pequeños
-      const childSlices = this.splitSlices(parentSlice.text, childMaxChars, undefined, sizeFor)
-        .filter(s => s.text.length >= childMinChars);
+      // 2. Dividir cada parent en children más pequeños. Los fragmentos que queden
+      //    por debajo de `childMinChars` (p. ej. un encabezado estructural corto como
+      //    "ARTICULO 1°" que quedó solo) no se descartan: se fusionan con el siguiente
+      //    para no perder el principio de cada sección/artículo.
+      const rawChildSlices = this.splitSlices(parentSlice.text, childMaxChars, undefined, sizeFor);
+      const childSlices = this.coalesceMin(rawChildSlices, childMinChars);
 
       for (const childSlice of childSlices) {
         const cStart = parentSlice.start + childSlice.start;
@@ -676,6 +682,36 @@ export class ChunkingService {
    * Divide texto en fragmentos de tamaño máximo `maxChars` preservando los
    * offsets sobre el texto de entrada. Devuelve los fragmentos como sub-rebanadas.
    */
+  /**
+   * Fusiona los child slices que queden por debajo de `childMinChars` con el
+   * siguiente, en lugar de descartarlos. Evita perder el principio de secciones/
+   * artículos (p. ej. "ARTICULO 1°" aislado).
+   */
+  private coalesceMin(
+    rawChildSlices: Array<{ text: string; start: number }>,
+    childMinChars: number
+  ): Array<{ text: string; start: number }> {
+    if (rawChildSlices.length === 0) return [];
+
+    const merged: Array<{ text: string; start: number }> = [];
+    let current = { text: rawChildSlices[0].text, start: rawChildSlices[0].start };
+
+    for (let i = 1; i < rawChildSlices.length; i++) {
+      const next = rawChildSlices[i];
+      if (current.text.length < childMinChars) {
+        current = {
+          text: current.text + next.text,
+          start: current.start,
+        };
+      } else {
+        merged.push(current);
+        current = { text: next.text, start: next.start };
+      }
+    }
+    merged.push(current);
+    return merged;
+  }
+
   private splitSlices(
     text: string,
     maxChars: number,
@@ -720,7 +756,15 @@ export class ChunkingService {
     let buffer: Array<{ text: string; start: number; end: number }> = [];
     let bufferLen = 0;
 
-    const flush = () => {
+    // Fronteras estructurales "fuertes" (artículos y secciones numeradas): un
+    // segmento que comienza en una de ellas inicia un chunk nuevo. Evita que el
+    // comienzo de un ARTÍCULO siguiente se pegue al final del chunk anterior.
+    // Las cabeceras (heading) quedan "blandas": se agrupan para no generar
+    // parents diminutos (ej. LEY / TITULO aislados).
+    const STRONG = new Set<BoundaryKind>(['numbered']);
+
+    // Emite el contenido acumulado (título + cuerpo ya juntados) como un chunk.
+    const emitJoined = () => {
       if (buffer.length === 0) return;
       out.push({
         text: buffer.map(s => s.text).join(PAGE_SEP),
@@ -731,24 +775,41 @@ export class ChunkingService {
       bufferLen = 0;
     };
 
+    // Corta por oración/línea el contenido acumulado + un segmento sobredimensionado,
+    // de modo que el título de un ARTÍCULO nunca quede huérfano de su cuerpo.
+    const emitOversized = (unit: Array<{ text: string; start: number; end: number }>, segMax: number) => {
+      const base = unit[0].start;
+      const text = unit.map(s => s.text).join(PAGE_SEP);
+      for (const piece of this.sliceOversized(text, segMax)) {
+        out.push({ text: piece.text, start: base + piece.start, end: base + piece.end });
+      }
+    };
+
     for (const seg of segments) {
       const segMax = sizeFor ? sizeFor({ text: seg.text }) : maxChars;
 
-      // Bloque único que excede su tope → fallback a cortes por oración/línea.
+      // Nueva estructura fuerte (artículo) con un chunk previo en curso → cerrarlo aquí
+      // y empezar el nuevo chunk con el encabezado del próximo artículo.
+      const isChunkStart = buffer.length === 0;
+      if (!isChunkStart && seg.kind && STRONG.has(seg.kind)) emitJoined();
+
+      // Segmento sobredimensionado: se trocea junto con cualquier encabezado pendiente
+      // (evita el título huérfano) y se descarta lo acumulado.
       if (seg.text.length > segMax) {
-        flush();
-        for (const piece of this.sliceOversized(seg.text, segMax)) {
-          out.push({ text: piece.text, start: seg.start + piece.start, end: seg.start + piece.end });
-        }
+        const unit = buffer.length > 0 ? [...buffer, seg] : [seg];
+        emitOversized(unit, segMax);
+        buffer = [];
+        bufferLen = 0;
         continue;
       }
 
+      // Acumulación normal hasta alcanzar el tope.
       const sepLen = buffer.length > 0 ? PAGE_SEP.length : 0;
-      if (buffer.length > 0 && bufferLen + sepLen + seg.text.length > segMax) flush();
+      if (buffer.length > 0 && bufferLen + sepLen + seg.text.length > segMax) emitJoined();
       buffer.push(seg);
       bufferLen += bufferLen === 0 ? seg.text.length : sepLen + seg.text.length;
     }
-    flush();
+    emitJoined();
 
     return out.filter(s => s.text.trim().length >= minChars);
   }
@@ -756,24 +817,26 @@ export class ChunkingService {
   /** Parte el texto en segmentos, cada uno desde una frontera hasta la siguiente. */
   private sliceByBoundaries(
     text: string,
-    boundaries: Array<{ start: number }>
-  ): Array<{ text: string; start: number; end: number }> {
+    boundaries: Array<{ start: number; kind: BoundaryKind }>
+  ): Array<{ text: string; start: number; end: number; kind?: BoundaryKind }> {
     const cuts = Array.from(new Set([0, ...boundaries.map(b => b.start)])).sort((a, b) => a - b);
-    const segs: Array<{ text: string; start: number; end: number }> = [];
+    const kindAt = new Map<number, BoundaryKind>();
+    for (const b of boundaries) if (!kindAt.has(b.start)) kindAt.set(b.start, b.kind);
+    const segs: Array<{ text: string; start: number; end: number; kind?: BoundaryKind }> = [];
 
-    const pushSeg = (start: number, end: number) => {
+    const pushSeg = (start: number, end: number, kind?: BoundaryKind) => {
       if (start >= end) return;
       const raw = text.slice(start, end);
       const ns = raw.search(/\S/);
       const ne = raw.search(/\s*$/);
       if (ns < 0 || ne <= ns) return;
       const trimmed = raw.slice(ns, ne);
-      segs.push({ text: trimmed, start: start + ns, end: start + ne });
+      segs.push({ text: trimmed, start: start + ns, end: start + ne, kind });
     };
 
-    for (let i = 0; i < cuts.length - 1; i++) pushSeg(cuts[i], cuts[i + 1]);
+    for (let i = 0; i < cuts.length - 1; i++) pushSeg(cuts[i], cuts[i + 1], cuts[i] > 0 ? kindAt.get(cuts[i]) : undefined);
     const tail = cuts[cuts.length - 1];
-    if (tail < text.length) pushSeg(tail, text.length);
+    if (tail < text.length) pushSeg(tail, text.length, tail > 0 ? kindAt.get(tail) : undefined);
     return segs;
   }
 
@@ -814,7 +877,13 @@ export class ChunkingService {
       let idx = windowText.lastIndexOf('\n');
       if (idx > 0) return from + idx;
 
-      idx = windowText.search(/[.;:!?](?:\s|$)/g);
+      // ÚLTIMO final de frase dentro de la ventana (antes se usaba search(), que
+      // devuelve el PRIMERO: partía justo tras un encabezado corto, p. ej.
+      // "ARTICULO 1° — (Objeto)." quedaba solo y luego se descartaba por tamaño).
+      idx = -1;
+      const sentRe = /[.;:!?](?:\s+|$)/g;
+      let m: RegExpExecArray | null;
+      while ((m = sentRe.exec(windowText)) !== null) idx = m.index;
       if (idx >= 0) return from + idx + 1;
 
       idx = windowText.lastIndexOf(' ');

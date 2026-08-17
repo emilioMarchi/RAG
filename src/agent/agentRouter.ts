@@ -6,7 +6,7 @@ import type { RAGSource } from '../services/ragEngine.js';
 
 export interface AgentResponse {
   answer: string;
-  intent: 'chat' | 'rag';
+  intent: 'chat' | 'rag' | 'list_docs';
   sources?: RAGSource[];
   cragDecision?: string;
   iterations?: number;
@@ -75,8 +75,37 @@ export class AgentRouter {
         cragDecision: ragResult.cragDecision,
         iterations: ragResult.iterations,
       };
+    } else if (decision.intent === 'list_docs') {
+      // 4b. Listar documentos disponibles directamente desde la DB
+      const docs = await this.tools.listDocuments();
+      console.log(`[AgentRouter] list_docs -> ${docs.length} documentos encontrados`);
+
+      let listContext: string;
+      if (docs.length === 0) {
+        listContext = 'No hay documentos cargados en la base de datos.';
+      } else {
+        const lines = docs.map((d, i) => {
+          const date = new Date(d.created_at).toLocaleDateString('es-AR');
+          return `${i + 1}. "${d.title}" (${d.mime_type}) — ${d.paragraph_count} fragmentos — cargado el ${date}`;
+        });
+        listContext = `Documentos disponibles en la base de datos (${docs.length}):\n${lines.join('\n')}`;
+      }
+
+      // Usar el LLM para generar una respuesta natural con ese contexto
+      const updatedHistory = await this.memory.getHistoryForLLM(sessionId);
+      const hint: { role: 'system'; content: string } = {
+        role: 'system',
+        content: `El usuario preguntó qué documentos hay disponibles. Aquí está la información exacta de la base de datos:\n${listContext}\nPresenta esta información de forma clara y amigable al usuario.`,
+      };
+      const answer = await this.agentLLM.generateChatResponse([hint, ...updatedHistory]);
+      await this.memory.addMessage(sessionId, 'assistant', answer);
+
+      return {
+        answer,
+        intent: 'list_docs',
+      };
     } else {
-      // 4b. Respuesta de chat directa
+      // 4c. Respuesta de chat directa
       // Volvemos a obtener el historial actualizado con el mensaje del usuario que recién agregamos
       const updatedHistory = await this.memory.getHistoryForLLM(sessionId);
       const answer = await this.agentLLM.generateChatResponse(updatedHistory);

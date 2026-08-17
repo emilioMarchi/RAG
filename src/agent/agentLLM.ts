@@ -2,7 +2,7 @@ import { LLMService } from '../services/llmService.js';
 import { ROUTER_PROMPT } from './prompts.js';
 
 export interface RouteDecision {
-  intent: 'chat' | 'rag';
+  intent: 'chat' | 'rag' | 'list_docs';
   query: string;
   reason: string;
 }
@@ -39,7 +39,7 @@ export class AgentLLM {
 
     try {
       const parsed = JSON.parse(content) as RouteDecision;
-      if (parsed.intent !== 'chat' && parsed.intent !== 'rag') {
+      if (parsed.intent !== 'chat' && parsed.intent !== 'rag' && parsed.intent !== 'list_docs') {
         throw new Error(`intent inválido: ${parsed.intent}`);
       }
       return parsed;
@@ -50,7 +50,7 @@ export class AgentLLM {
       if (start !== -1 && end !== -1 && start < end) {
         try {
           const parsed = JSON.parse(content.slice(start, end + 1)) as RouteDecision;
-          if (parsed.intent === 'chat' || parsed.intent === 'rag') return parsed;
+          if (parsed.intent === 'chat' || parsed.intent === 'rag' || parsed.intent === 'list_docs') return parsed;
         } catch {
           // sigue al fallback final
         }

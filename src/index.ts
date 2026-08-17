@@ -34,8 +34,16 @@ const storage = new StorageService();
 const chunker = new ChunkingService();
 const pipeline = new IngestionPipeline(embedder, llm, storage);
 const rag = new HierarchicalRAGModule(embedder, llm);
-const iterativeRag = new IterativeRAGEngine(embedder, llm);
-const agentService = new AgentService(llm, iterativeRag);
+const iterativeRag = new IterativeRAGEngine(embedder, llm, {
+  maxIterations: env.RAG_MAX_ITERATIONS,
+  enableReranking: env.RAG_ENABLE_RERANKING,
+  enableCRAG: env.RAG_ENABLE_CRAG,
+});
+const agentService = new AgentService(llm, iterativeRag, {
+  maxTurns: env.AGENT_MAX_TURNS,
+  topDocs: env.AGENT_TOP_DOCS,
+  topParagraphs: env.AGENT_TOP_PARAGRAPHS,
+});
 
 app.use('/api', createDocumentRouter(pipeline, chunker, storage));
 app.use('/api', createQueryRouter(rag, iterativeRag, llm));

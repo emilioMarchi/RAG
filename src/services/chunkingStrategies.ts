@@ -15,6 +15,10 @@ export interface ChunkingFileMetadata {
   /** Extensión del archivo (ej: .md, .pdf) */
   fileExtension?: string;
   mimeType?: string;
+  /** Fase 3: overlap entre child chunks (chars). Default 0 (sin regresión). */
+  overlapChars?: number;
+  /** Fase 7: tamaño adaptativo por densidad. Default false (tamaños fijos). */
+  adaptive?: boolean;
 }
 
 /**
@@ -60,9 +64,9 @@ export interface ChunkingStrategy {
 export class GenericChunkingStrategy implements ChunkingStrategy {
   readonly config: ChunkingStrategyConfig = {
     name: 'generic',
-    parentMaxChars: 1000,
-    childMaxChars: 450,
-    childMinChars: 80,
+    parentMaxChars: 2500, // ~700 tokens para el contexto del LLM
+    childMaxChars: 1000,  // ~250 tokens para embeddings densos
+    childMinChars: 150,
   };
 
   prepare(text: string): PreparedText {
@@ -78,9 +82,9 @@ export class GenericChunkingStrategy implements ChunkingStrategy {
 export class LegalNormChunkingStrategy implements ChunkingStrategy {
   readonly config: ChunkingStrategyConfig = {
     name: 'legal',
-    parentMaxChars: 1500,
-    childMaxChars: 600,
-    childMinChars: 100,
+    parentMaxChars: 3500, // ~1000 tokens para la ventana de contexto del LLM
+    childMaxChars: 1200,  // ~300-350 tokens para embeddings semánticos densos
+    childMinChars: 150,
     clean: (t) => this.cleanWithMap(t).text,
   };
 
@@ -121,8 +125,26 @@ export class LegalNormChunkingStrategy implements ChunkingStrategy {
         const prevNL = i > 0 && text[i - 1] === '\n';
         const nextNL = i + 1 < L && text[i + 1] === '\n';
         if (prevNL || nextNL) { out.push('\n'); src.push(i); i += 1; continue; } // párrafo
-        if (prevW && i + 1 < L && isW(text[i + 1])) { i += 1; continue; } // unir sin salto
-        out.push(' '); src.push(i); i += 1; continue; // salto simple → espacio
+
+        // Conservar el salto de línea si la línea siguiente es ESTRUCTURAL (ARTICULO,
+        // numeración, encabezado, ítem de lista). Sin esto, colapsar el \n en espacio
+        // haría que el detector de fronteras (que es POR LÍNEA) ya no viera el inicio
+        // de cada artículo y absorbiera el título dentro del chunk anterior.
+        let k = i + 1;
+        while (k < L && (text[k] === ' ' || text[k] === '\t')) k++;
+        const lineEnd = text.indexOf('\n', k);
+        const line = text.slice(k, lineEnd < 0 ? Math.min(L, k + 60) : lineEnd).trim();
+        if (/^(\d{1,4}[.)]|[ivxlcdm]{2,8}[.)]|art(?:ículo|iculo)?\.?\s*\d+|#{1,6}\s+|[-*•·]\s+|[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ]{3,48}:)/i.test(line)) {
+          out.push('\n'); src.push(i); i += 1; continue;
+        }
+
+        // Palabra partida por salto de línea (hipenación) → unir sin espacio ni salto.
+        if (prevW && i + 1 < L && isW(text[i + 1])) { i += 1; continue; }
+
+        // Salto de línea simple dentro de un párrafo → espacio. Antes se eliminaba
+        // cuando iba entre dos letras, pegando palabras ("datos personales" →
+        // "personalesasentados") y borrando los saltos que detectan las fronteras.
+        out.push(' '); src.push(i); i += 1; continue;
       }
 
       out.push(ch); src.push(i); i += 1;
@@ -258,29 +280,26 @@ export function splitWithStrategy(
 
     const contextPath = outline.length > 0 ? outlinePathAt(outline, loc.startChar) : undefined;
 
-    // Fase 3 — Overlap: retroceder el inicio del child sobre el texto preparado
-    // para incluir la cola del chunk anterior, sin perder contexto en el corte.
-    // La ubicación (línea/página/bbox) se sigue recalculando contra el texto original.
-    const extStart = Math.max(0, loc.startChar - overlapChars);
-    const extEnd = loc.endChar;
-    const textWithOverlap = overlapChars > 0 ? prepared.text.slice(extStart, extEnd) : ch.text;
+    // Fase 3 — Overlap sobre el texto preparado, SOLO para enriquecer/vectorizar.
+    // Fase 5/B — El fragmento publicado (`text` y `location`) queda como el NÚCLEO SIN
+    // overlap, de modo que el visor resalte exactamente el contenido propio del chunk
+    // (no la cola del anterior). El rango ampliado se expone aparte en `extendedText`
+    // y NO afecta la ubicación ni las marcas del PDF.
+    const extendedText = overlapChars > 0
+      ? prepared.text.slice(Math.max(0, loc.startChar - overlapChars), loc.endChar)
+      : ch.text;
 
-    const located = chunker.locateOnOriginal(text, opts.pages, extStart, extEnd, prepared.index);
-
-    // Fase 5 — Rango core vs extended: registrar también el rango útil del chunk SIN
-    // overlap (en el texto original) para que el visor resalte el núcleo por defecto.
-    if (overlapChars > 0) {
-      const core = chunker.locateOnOriginal(text, opts.pages, loc.startChar, loc.endChar, prepared.index);
-      if (core.startChar != null && core.endChar != null) {
-        located.coreStartChar = core.startChar;
-        located.coreEndChar = core.endChar;
-      }
+    const located = chunker.locateOnOriginal(text, opts.pages, loc.startChar, loc.endChar, prepared.index);
+    // Core == rango publicado (sin overlap). Lo anotamos por compatibilidad con F5.
+    if (located.startChar != null && located.endChar != null) {
+      located.coreStartChar = located.startChar;
+      located.coreEndChar = located.endChar;
     }
 
     return {
       ...ch,
-      text: textWithOverlap,
       location: located,
+      ...(extendedText !== ch.text ? { extendedText } : {}),
       ...(contextPath ? { contextPath } : {}),
     };
   });

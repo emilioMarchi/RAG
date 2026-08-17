@@ -5,14 +5,24 @@ import { AgentLLM } from './agentLLM.js';
 import { AgentTools } from './tools.js';
 import { AgentRouter, type AgentResponse } from './agentRouter.js';
 
+export interface AgentConfig {
+  maxTurns?: number;
+  topDocs?: number;
+  topParagraphs?: number;
+}
+
 export class AgentService {
   private memory: ConversationMemory;
   private router: AgentRouter;
 
-  constructor(llmService: LLMService, iterativeRag: IterativeRAGEngine) {
-    this.memory = new ConversationMemory(llmService, 10);
+  constructor(llmService: LLMService, iterativeRag: IterativeRAGEngine, config: AgentConfig = {}) {
+    const maxTurns = config.maxTurns ?? 10;
+    this.memory = new ConversationMemory(llmService, maxTurns);
     const agentLLM = new AgentLLM(llmService);
-    const tools = new AgentTools(iterativeRag);
+    const tools = new AgentTools(iterativeRag, {
+      topDocs: config.topDocs,
+      topParagraphs: config.topParagraphs,
+    });
     this.router = new AgentRouter(this.memory, agentLLM, tools);
   }
 

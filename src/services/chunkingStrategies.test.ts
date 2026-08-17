@@ -112,7 +112,7 @@ describe('splitWithStrategy', () => {
 
   it('aplica overlap hacia atrás entre child chunks cuando overlapChars > 0', () => {
     const generic = new GenericChunkingStrategy()
-    const text = 'palabra '.repeat(120) // texto corrido que fuerza varios children
+    const text = 'palabra '.repeat(400) // texto corrido que fuerza varios children
 
     const noOverlap = splitWithStrategy(c, text, generic, { childMinChars: 1 })
     const withOverlap = splitWithStrategy(c, text, generic, { childMinChars: 1, overlapChars: 40 })
@@ -120,9 +120,11 @@ describe('splitWithStrategy', () => {
     expect(noOverlap.children.length).toBeGreaterThan(1)
     expect(withOverlap.children.length).toBe(noOverlap.children.length)
 
-    // El 2º child con overlap empieza antes (incluye contexto del previo)
+    // El 2º child con overlap expone su contexto ampliado en `extendedText`,
+    // mientras su `text` (núcleo, Fase 5) queda sin solape.
     const b = withOverlap.children[1]
-    expect(b.text.length).toBeGreaterThan(noOverlap.children[1].text.length)
+    expect(b.extendedText).toBeDefined()
+    expect(b.extendedText!.length).toBeGreaterThan(b.text.length)
     // La location sigue anclada al texto ORIGINAL: el slice deriva del original, no del preparado
     const loc = b.location
     expect(loc).toBeDefined()
@@ -131,7 +133,7 @@ describe('splitWithStrategy', () => {
 
   it('registra rango core (sin overlap) vs extended cuando overlapChars > 0', () => {
     const generic = new GenericChunkingStrategy()
-    const text = 'palabra '.repeat(120)
+    const text = 'palabra '.repeat(400)
 
     const withOverlap = splitWithStrategy(c, text, generic, { childMinChars: 1, overlapChars: 40 })
     const b = withOverlap.children[1]
@@ -140,12 +142,10 @@ describe('splitWithStrategy', () => {
     expect(loc).toBeDefined()
     expect(loc!.coreStartChar).toBeDefined()
     expect(loc!.coreEndChar).toBeDefined()
-    // El núcleo NO incluye el overlap: empieza después del rango ampliado
+    // El núcleo NO incluye el overlap: es el rango publicado del chunk (b.text)
     expect(loc!.coreStartChar!).toBeGreaterThanOrEqual(loc!.startChar!)
     expect(loc!.coreEndChar!).toBeLessThanOrEqual(loc!.endChar!)
-    // El rango core apunta al fragmento real del chunk (b.text) descontado el prefijo
-    const coreSlice = text.slice(loc!.coreStartChar!, loc!.coreEndChar!)
-    expect(b.text.endsWith(coreSlice)).toBe(true)
+    expect(loc!.coreEndChar! - loc!.coreStartChar!).toBe(b.text.length)
   })
 
   it('ancla un contextPath normativo jerárquico en la estrategia legal (Fase 6)', () => {

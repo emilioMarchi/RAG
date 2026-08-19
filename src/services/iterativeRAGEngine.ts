@@ -1,10 +1,19 @@
 import { EmbeddingService } from './embeddingService.js';
 import { LLMService } from './llmService.js';
 import { HybridSearchService, type ScoredChunk } from './hybridSearchService.js';
-import { RerankingService } from './rerankingService.js';
+import { RerankingService, type RerankStrategy } from './rerankingService.js';
 import { CRAGEvaluator } from './cragEvaluator.js';
+import { mapConcurrent } from '../utils/concurrency.js';
 import { query } from '../config/db.js';
 import type { RAGSource, RAGResult } from './ragEngine.js';
+
+/** Lanza la ejecución de una consulta que superó el presupuesto de latencia. */
+export class QueryTimeoutError extends Error {
+  constructor(timeoutMs: number) {
+    super(`La consulta RAG superó el presupuesto de ${timeoutMs}ms.`);
+    this.name = 'QueryTimeoutError';
+  }
+}
 
 export class IterativeRAGEngine {
   private hybridSearch: HybridSearchService;
@@ -22,13 +31,20 @@ export class IterativeRAGEngine {
       vectorWeight?: number;
       bm25Weight?: number;
       enableReranking?: boolean;
+      rerankStrategy?: RerankStrategy;
       enableParentChunks?: boolean;
-      /** Activar corrective RAG (re-búsqueda si el contexto es irrelevante). Default: true */
-      enableCRAG?: boolean;
+      /** Corrective RAG: nº máximo de pases de re-búsqueda (0 = off). Default: 0 */
+      cragMaxPasses?: number;
+      /** Bucle de expansión de contexto con LLM (evaluateContext). Default: false */
+      enableContextExpansion?: boolean;
+      /** Usar decomposición de query con LLM. Default: true */
+      enableDecompose?: boolean;
+      /** Presupuesto global de latencia en ms (0 = sin límite). Default: 0 */
+      timeoutMs?: number;
     } = {}
   ) {
     this.hybridSearch = new HybridSearchService();
-    this.reranker = new RerankingService(llm);
+    this.reranker = new RerankingService(llm, options.rerankStrategy ?? 'hybrid');
     this.crag = new CRAGEvaluator(llm);
   }
 
@@ -42,6 +58,28 @@ export class IterativeRAGEngine {
     _topParagraphs = 10,
     _similarityThreshold = 0
   ): Promise<RAGResult & { iterations: number }> {
+    const timeoutMs = this.options.timeoutMs ?? 0;
+    if (!timeoutMs || timeoutMs <= 0) {
+      return this.runQuery(userQuery, topDocs);
+    }
+
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      return await Promise.race([
+        this.runQuery(userQuery, topDocs),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new QueryTimeoutError(timeoutMs)), timeoutMs);
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  private async runQuery(
+    userQuery: string,
+    topDocs = 5
+  ): Promise<RAGResult & { iterations: number }> {
     const {
       maxContextParagraphs = 20,
       retrievalCandidates = 20,
@@ -50,43 +88,37 @@ export class IterativeRAGEngine {
       bm25Weight = 0.4,
       enableReranking = true,
       enableParentChunks = true,
+      cragMaxPasses = 0,
+      enableContextExpansion = false,
+      enableDecompose = true,
     } = this.options;
 
     // ── 1. Descomponer la query en sub-consultas ─────────────────────────────
-    const subQueries = await this.llm.decomposeQuery(userQuery);
-
-    // ── 2. Recolectar documentos candidatos para todas las sub-queries ───────
-    const candidateIdsSet = new Set<string>();
-    for (const subQ of subQueries) {
-      const baseQueryVector = await this.embedder.generateEmbedding(subQ, 768);
-      const candidateDocsRes = await query<{ id: string }>(
-        `SELECT id FROM documents ORDER BY embedding_base <=> $1::vector LIMIT $2`,
-        [JSON.stringify(baseQueryVector), topDocs]
-      );
-      for (const row of candidateDocsRes.rows) candidateIdsSet.add(row.id);
+    let subQueries: string[];
+    if (enableDecompose) {
+      subQueries = await this.llm.decomposeQuery(userQuery);
+    } else {
+      subQueries = [userQuery];
     }
 
-    const candidateIds = Array.from(candidateIdsSet);
-    if (candidateIds.length === 0) {
-      return { answer: 'No se encontraron documentos relacionados con tu consulta.', sources: [], iterations: 0 };
-    }
-
-    // ── 3. Búsqueda Híbrida por sub-query + fusión RRF multi-query ────────────
-    // Cada sub-query produce su propio ranking; luego se fusionan todos con RRF.
-    const perQueryRankings: ScoredChunk[][] = [];
-
-    for (const subQ of subQueries) {
-      const highVector = await this.embedder.generateEmbedding(subQ, 1536);
-      const hits = await this.hybridSearch.search(
-        candidateIds,
-        highVector,
-        subQ,
-        retrievalCandidates,
-        vectorWeight,
-        bm25Weight
-      );
-      perQueryRankings.push(hits);
-    }
+    // ── 2+3. Búsqueda Híbrida por sub-query + fusión RRF multi-query ────────
+    // Cada sub-query se embebe (1536d) y busca en paralelo; se omiten los docIds
+    // ([] = todos los párrafos), evitando el doble embedding 768d + filtro de docs.
+    const perQueryRankings = await mapConcurrent(
+      subQueries,
+      async (subQ) => {
+        const highVector = await this.embedder.generateEmbedding(subQ, 1536);
+        return this.hybridSearch.search(
+          [],
+          highVector,
+          subQ,
+          retrievalCandidates,
+          vectorWeight,
+          bm25Weight
+        );
+      },
+      Math.max(1, Math.min(subQueries.length, 4))
+    );
 
     // RRF multi-query: fusionar todos los rankings de sub-queries
     let sources = this.rrfMergeMultiQuery(perQueryRankings, maxContextParagraphs);
@@ -95,7 +127,7 @@ export class IterativeRAGEngine {
       return { answer: 'No se encontraron fragmentos relevantes para tu consulta.', sources: [], iterations: 1 };
     }
 
-    // ── 4. Re-ranking inicial ────────────────────────────────────────────────
+    // ── 4. Re-ranking ────────────────────────────────────────────────────────
     if (enableReranking) {
       sources = await this.reranker.rerank(userQuery, sources, finalTopK);
     } else {
@@ -113,81 +145,81 @@ export class IterativeRAGEngine {
 
     let iterations = 0;
     let ragSources: RAGSource[] = await this.enrichWithParents(sources as ScoredChunk[], enableParentChunks);
-    let previousCount = -1;
 
-    while (iterations < this.maxIterations) {
-      iterations += 1;
+    if (enableContextExpansion) {
+      let previousCount = -1;
+      while (iterations < this.maxIterations) {
+        iterations += 1;
 
-      const contextText = formatContext(ragSources);
-      const evaluation = await this.llm.evaluateContext(userQuery, contextText);
+        const contextText = formatContext(ragSources);
+        const evaluation = await this.llm.evaluateContext(userQuery, contextText);
 
-      if (evaluation.decision !== 'expand' || !evaluation.expand_requests?.length) break;
+        if (evaluation.decision !== 'expand' || !evaluation.expand_requests?.length) break;
 
-      const expanded: RAGSource[] = [];
-      for (const req of evaluation.expand_requests) {
-        let resolvedDocId = req.docId;
-        const matching = ragSources.find(
-          s =>
-            (s as any).document_id === req.docId ||
-            s.doc_title === req.docId ||
-            s.doc_title.includes(req.docId) ||
-            req.docId.includes(s.doc_title)
-        );
-        if (matching) resolvedDocId = (matching as any).document_id;
+        const expanded: RAGSource[] = [];
+        for (const req of evaluation.expand_requests) {
+          let resolvedDocId = req.docId;
+          const matching = ragSources.find(
+            s =>
+              (s as any).document_id === req.docId ||
+              s.doc_title === req.docId ||
+              s.doc_title.includes(req.docId) ||
+              req.docId.includes(s.doc_title)
+          );
+          if (matching) resolvedDocId = (matching as any).document_id;
 
-        if (resolvedDocId && req.paragraphIndex !== undefined) {
-          const adj = await this.adjacentParagraphs(resolvedDocId, req.paragraphIndex, req.direction, req.count || 1);
-          expanded.push(...adj);
+          if (resolvedDocId && req.paragraphIndex !== undefined) {
+            const adj = await this.adjacentParagraphs(resolvedDocId, req.paragraphIndex, req.direction, req.count || 1);
+            expanded.push(...adj);
+          }
         }
-      }
 
-      const merged = this.mergeRAGSources(ragSources, expanded, maxContextParagraphs);
-      if (merged.length === previousCount || merged.length === ragSources.length) {
+        const merged = this.mergeRAGSources(ragSources, expanded, maxContextParagraphs);
+        if (merged.length === previousCount || merged.length === ragSources.length) {
+          ragSources = merged;
+          break;
+        }
+
+        previousCount = ragSources.length;
         ragSources = merged;
-        break;
       }
-
-      previousCount = ragSources.length;
-      ragSources = merged;
     }
 
-    // ── 6. Corrective RAG (CRAG): evaluar relevancia y re-buscar si es necesario ──────
-    const enableCRAG = this.options.enableCRAG !== false;
+    // ── 6. Corrective RAG (CRAG) con presupuesto de pases ────────────────────
     let cragDecision = 'RELEVANT';
 
-    if (enableCRAG) {
-      const evaluation = await this.crag.evaluate(userQuery, ragSources);
-      cragDecision = evaluation.decision;
-      console.log(`[CRAG] Decision: ${evaluation.decision} | ${evaluation.reason}`);
+    if (cragMaxPasses > 0) {
+      let budget = cragMaxPasses;
+      let currentSources = ragSources;
 
-      if (evaluation.decision !== 'RELEVANT' && evaluation.reformulated_query) {
-        // Re-buscar con la query reformulada
+      while (budget > 0) {
+        budget -= 1;
+        const evaluation = await this.crag.evaluate(userQuery, currentSources);
+        cragDecision = evaluation.decision;
+        console.log(`[CRAG] Decision: ${evaluation.decision} | ${evaluation.reason}`);
+
+        if (evaluation.decision === 'RELEVANT' || !evaluation.reformulated_query) break;
+
         const reformulated = evaluation.reformulated_query;
         console.log(`[CRAG] Re-searching with reformulated query: "${reformulated}"`);
 
-        const refEmbedBase = await this.embedder.generateEmbedding(reformulated, 768);
-        const refDocRes = await query<{ id: string }>(
-          `SELECT id FROM documents ORDER BY embedding_base <=> $1::vector LIMIT $2`,
-          [JSON.stringify(refEmbedBase), topDocs]
+        // Re-búsqueda sin filtro de docs ni doble embedding (1536d único).
+        const refVector = await this.embedder.generateEmbedding(reformulated, 1536);
+        const refChunks = await this.hybridSearch.search(
+          [], refVector, reformulated,
+          retrievalCandidates, vectorWeight, bm25Weight
         );
-        const refDocIds = refDocRes.rows.map(r => r.id);
+        const refReranked = enableReranking
+          ? await this.reranker.rerank(reformulated, refChunks, finalTopK)
+          : refChunks.slice(0, finalTopK);
 
-        if (refDocIds.length > 0) {
-          const refVector = await this.embedder.generateEmbedding(reformulated, 1536);
-          const refChunks = await this.hybridSearch.search(
-            refDocIds, refVector, reformulated,
-            retrievalCandidates, vectorWeight, bm25Weight
-          );
-          const refReranked = enableReranking
-            ? await this.reranker.rerank(reformulated, refChunks, finalTopK)
-            : refChunks.slice(0, finalTopK);
+        const refSources = await this.enrichWithParents(refReranked as ScoredChunk[], enableParentChunks);
 
-          const refSources = await this.enrichWithParents(refReranked as ScoredChunk[], enableParentChunks);
-
-          // Fusionar con el contexto original (el nuevo tiene prioridad)
-          ragSources = this.mergeRAGSources(refSources, ragSources, maxContextParagraphs);
-        }
+        // Fusionar con el contexto original (el nuevo tiene prioridad)
+        currentSources = this.mergeRAGSources(refSources, currentSources, maxContextParagraphs);
       }
+
+      ragSources = currentSources;
     }
 
     // ── 7. Respuesta final ──────────────────────────────────────────

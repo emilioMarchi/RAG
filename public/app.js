@@ -1005,7 +1005,7 @@ async function sendChat() {
     loadingEl.querySelector('.chat-bubble').innerHTML = renderAnswer(result.answer, buildCitationLabels(result.sources));
     loadingEl.querySelector('.chat-bubble').classList.remove('loading');
 
-    if (result.iterations !== undefined) {
+    if (result.iterations > 0) {
       const itEl = document.createElement('div');
       itEl.className = 'chat-iterations';
       itEl.textContent = `🔁 ${result.iterations} iteración${result.iterations === 1 ? '' : 'es'}`;

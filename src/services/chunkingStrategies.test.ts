@@ -63,6 +63,16 @@ describe('LegalNormChunkingStrategy', () => {
     }
   })
 
+  it('conserva el salto de línea ante incisos en minúscula (a), b)) para no romper fronteras', () => {
+    const s = new LegalNormChunkingStrategy()
+    const text = 'ARTICULO 1. - Cuerpo del artículo.\na) inciso primero.\nb) inciso segundo.'
+    const prepared = s.prepare(text)
+    // a)/b) siguen en líneas propias → el detector de fronteras las ve como incisos
+    expect(prepared.text).toContain('a) inciso primero.')
+    expect(prepared.text.split('\n').some(l => /^a\)/.test(l))).toBe(true)
+    expect(prepared.text.split('\n').some(l => /^b\)/.test(l))).toBe(true)
+  })
+
   it('produce un mapa offset(preparado)→offset(original) alineado al texto fuente', () => {
     const s = new LegalNormChunkingStrategy()
     const original = 'A.\nB\n\nC.'
@@ -180,5 +190,47 @@ describe('splitWithStrategy', () => {
     // un sizeFor generoso devuelve menos chunks que el estricto
     const loose = splitWithStrategy(c, text, generic, { childMinChars: 1, sizeFor: () => 100000 })
     expect(loose.children.length).toBeLessThan(strict.children.length)
+  })
+
+  it('usa un parent chunk por ARTICULO en la estrategia legal con los títulos adheridos', () => {
+    const legal = new LegalNormChunkingStrategy()
+    const law = [
+      'LEY 27.541 - PRESUPUESTO.',
+      'CONSIDERANDO que resulta necesario adecuar el regimen fiscal.',
+      'TITULO II - REGIMEN FISCAL.',
+      'ARTICULO 1. - Objeto de la presente.',
+      'ARTICULO 2. - Facultades de la autoridad.',
+      'ANEXO I',
+      'Planilla de detalle.',
+    ].join('\n')
+    const { parents } = splitWithStrategy(c, law, legal, { childMinChars: 1 })
+    // preámbulo + ARTICULO 1 + ARTICULO 2 + ANEXO I
+    expect(parents.length).toBe(4)
+    expect(parents[0].text).toContain('CONSIDERANDO')
+    expect(parents[1].text).toContain('TITULO II')
+    expect(parents[1].text).toContain('ARTICULO 1. - Objeto')
+    // el TITULO II no se cuela en el chunk del artículo anterior (preámbulo)
+    expect(parents[1].text).not.toContain('CONSIDERANDO')
+    expect(parents[2].text).toContain('ARTICULO 2.')
+    expect(parents[3].text).toContain('ANEXO I')
+  })
+
+  it('cae al particionado por tamaño cuando el texto legal no tiene ARTICULO (cero regresión)', () => {
+    const legal = new LegalNormChunkingStrategy()
+    const text = '1. Primera cláusula con contenido suficiente. '.repeat(3)
+    const { parents } = splitWithStrategy(c, text, legal, { childMinChars: 1 })
+    expect(parents.length).toBeGreaterThan(0)
+  })
+
+  it('la estrategia genérica no activa el particionado por artículo (título queda colgado)', () => {
+    const generic = new GenericChunkingStrategy()
+    const law = 'ARTICULO 1. - Uno.\nTITULO II - REGIMEN FISCAL.\nARTICULO 2. - Dos.'
+    const { parents } = splitWithStrategy(c, law, generic, { childMinChars: 1 })
+    // genérica: el TITULO II (línea sin numeración) se pega al chunk del ARTICULO 1
+    expect(parents[0].text).toContain('TITULO II')
+    // la legal (articleAware) lo adhiere al ARTICULO 2 que abre
+    const legal = new LegalNormChunkingStrategy()
+    const legalParents = splitWithStrategy(c, law, legal, { childMinChars: 1 }).parents
+    expect(legalParents[1].text.startsWith('TITULO II')).toBe(true)
   })
 })

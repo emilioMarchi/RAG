@@ -92,11 +92,14 @@ async function renderPDF(docId, location, fragmentText) {
   const pdf = await window.pdfjsLib.getDocument({ data }).promise;
 
   const targetPage = Math.max(1, Math.min(location?.pageNumber || 1, pdf.numPages));
-  const targetBoxes = Array.isArray(location?.boundingBoxes) ? location.boundingBoxes.filter(b => b) : [];
 
   const maxPages = Math.min(pdf.numPages, 80);
-  let targetWrapper = null;
+  let targetPageNo = targetPage;
 
+  // Recolectamos primero todas las páginas (wrapper + capa de texto) y las
+  // AGREGAMOS al DOM antes de medir posiciones: getBoundingClientRect() devuelve
+  // ceros sobre elementos que aún no están en el documento.
+  const rendered = [];
   for (let n = 1; n <= maxPages; n++) {
     const page = await pdf.getPage(n);
     const base = page.getViewport({ scale: 1 });
@@ -138,70 +141,162 @@ async function renderPDF(docId, location, fragmentText) {
       // Si la capa de texto falla, el visor sigue funcionando solo con canvas.
     }
     wrapper.appendChild(textLayer);
-
-    // Marcado del fragmento: un único sistema, derivado de los spans de la capa
-    // de texto (que pdf.js coloca pixel-perfect sobre el canvas). De ese modo el
-    // resaltado queda siempre alineado con el texto real; los boundingBoxes solo
-    // se usan como respaldo si no hay coincidencia de texto.
-    if (n === targetPage) {
-      let boxes = spansToBoxes(findFragmentSpans(textLayer, textDivs, fragmentText), textLayer);
-      if (!boxes.length && targetBoxes.length) {
-        boxes = targetBoxes
-          .filter(b => b && b.x != null && b.y != null && b.width != null && b.height != null)
-          .map(b => ({
-            left: b.x * viewport.width,
-            top: b.y * viewport.height,
-            width: b.width * viewport.width,
-            height: b.height * viewport.height,
-          }));
-      }
-      for (const box of boxes) {
-        const hl = document.createElement('div');
-        hl.className = 'pdf-hl';
-        hl.style.left = box.left + 'px';
-        hl.style.top = box.top + 'px';
-        hl.style.width = box.width + 'px';
-        hl.style.height = box.height + 'px';
-        wrapper.appendChild(hl);
-      }
-      wrapper.style.borderColor = 'var(--accent)';
-      targetWrapper = wrapper;
-    }
     viewerPdf.appendChild(wrapper);
+    rendered.push({ n, wrapper, viewport, textLayer, textDivs });
   }
 
-  if (targetWrapper) {
-    targetWrapper.scrollIntoView({ block: 'start', behavior: 'smooth' });
+  // ── Resaltado ──────────────────────────────────────────────────────────
+  // Prioridad: los bounding boxes guardados son DETERMINISTAS (derivados por offset
+  // del chunk en el texto original durante la ingesta), así que coincide exactamente
+  // con el texto mostrado en el grafo. El matching por capa de texto solo se usa como
+  // respaldo si el chunk no trae coordenadas (p. ej. docs ingeridos antes de este cambio).
+  let highlighted = false;
+
+  // 1) Coordenadas normalizadas guardadas por página (boxesByPage) — exactas.
+  const byPage = Array.isArray(location?.boxesByPage) ? location.boxesByPage : [];
+  if (byPage.length > 0) {
+    const pageToWrap = new Map(rendered.map(r => [r.n, r]));
+    for (const pg of byPage) {
+      const item = pageToWrap.get(pg.pageNumber);
+      if (!item || !Array.isArray(pg.boxes)) continue;
+      for (const b of pg.boxes) {
+        if (!b || b.x == null || b.y == null || b.width == null || b.height == null) continue;
+        item.wrapper.appendChild(makeHighlight({
+          left: b.x * item.viewport.width,
+          top: b.y * item.viewport.height,
+          width: b.width * item.viewport.width,
+          height: b.height * item.viewport.height,
+        }));
+      }
+      item.wrapper.style.borderColor = 'var(--accent)';
+      highlighted = true;
+    }
+  }
+
+  // 2) Respaldo antiguo: boundingBoxes de una sola página (docs previos a boxesByPage).
+  const targetBoxes = Array.isArray(location?.boundingBoxes) ? location.boundingBoxes.filter(b => b) : [];
+  if (!highlighted && targetBoxes.length) {
+    const item = rendered.find(r => r.n === targetPageNo);
+    if (item) {
+      for (const b of targetBoxes) {
+        if (!b || b.x == null || b.y == null || b.width == null || b.height == null) continue;
+        item.wrapper.appendChild(makeHighlight({
+          left: b.x * item.viewport.width,
+          top: b.y * item.viewport.height,
+          width: b.width * item.viewport.width,
+          height: b.height * item.viewport.height,
+        }));
+      }
+      item.wrapper.style.borderColor = 'var(--accent)';
+      highlighted = true;
+    }
+  }
+
+  // 3) Último respaldo: derivar de los spans de la capa de texto (pixel-perfect).
+  //    Se busca el fragmento a lo largo de TODAS las páginas (puede cruzar límites).
+  if (!highlighted) {
+    const matchedLinePerPage = findFragmentAcrossPages(rendered, fragmentText);
+    for (const { n, wrapper, viewport, textLayer } of rendered) {
+      const spans = matchedLinePerPage.get(n) || [];
+      if (!spans.length) continue;
+      const boxes = spansToBoxes(spans, textLayer);
+      for (const box of boxes) {
+        wrapper.appendChild(makeHighlight(box));
+      }
+      wrapper.style.borderColor = 'var(--accent)';
+      highlighted = true;
+    }
+  }
+
+  // Desplazamos a la primera página que contenga un resaltado; si no hay, a la
+  // página objetivo indicada por el fragmento.
+  const pagesWithHl = Array.from(viewerPdf.querySelectorAll('.pdf-page'))
+    .filter(p => p.querySelector('.pdf-hl'));
+  const scrollTo = pagesWithHl.length
+    ? pagesWithHl[0]
+    : Array.from(viewerPdf.querySelectorAll('.pdf-page')).find(p => Number(p.dataset.page) === targetPageNo);
+  if (scrollTo) {
+    scrollTo.scrollIntoView({ block: 'start', behavior: 'smooth' });
   }
 }
 
-// Devuelve los spans de la capa de texto que contienen el fragmento, mediante
-// una coincidencia exacta y contigua sobre el texto normalizado (sin el fallback
-// por palabras sueltas, que causaba marcas dispersas en distintas partes).
-function findFragmentSpans(textLayer, textDivs, fragmentText) {
-  const targets = textDivs && textDivs.length
-    ? textDivs
-    : Array.from((textLayer && textLayer.querySelectorAll('span')) || []);
-  if (!fragmentText || targets.length === 0) return [];
+function makeHighlight(box) {
+  const hl = document.createElement('div');
+  hl.className = 'pdf-hl';
+  hl.style.left = box.left + 'px';
+  hl.style.top = box.top + 'px';
+  hl.style.width = box.width + 'px';
+  hl.style.height = box.height + 'px';
+  return hl;
+}
+
+// Busca el fragmento a lo largo de todas las páginas renderizadas (el texto de un
+// chunk puede cruzar límites de página o verse alterado por la limpieza). Devuelve
+// un Map { pageNumber -> [spans] } con los spans que contienen partes del fragmento,
+// o un Map vacío si no hay coincidencia.
+function findFragmentAcrossPages(rendered, fragmentText) {
+  const out = new Map();
+  if (!rendered || rendered.length === 0) return out;
 
   const norm = (s) => (s || '').replace(/\s+/g, ' ');
-  const needle = norm(fragmentText.trim());
-  if (!needle) return [];
+  const needle = norm((fragmentText || '').trim());
+  if (!needle) return out;
 
-  const normalized = targets.map(d => norm(d.textContent || ''));
-  const joined = normalized.join('');
-  const idx = joined.indexOf(needle);
-  if (idx < 0) return []; // sin coincidencia → sin marcas dispersas
+  const pageSpans = rendered.map(({ textDivs, textLayer }) => {
+    const targets = textDivs && textDivs.length
+      ? textDivs
+      : Array.from((textLayer && textLayer.querySelectorAll('span')) || []);
+    const normalized = targets.map(d => norm(d.textContent || ''));
+    const offsets = [];
+    let acc = 0;
+    for (const t of normalized) { offsets.push(acc); acc += Math.max(t.length, 1); }
+    return { targets, normalized, offsets, total: acc };
+  });
 
-  const out = [];
-  let acc = 0;
-  for (let i = 0; i < targets.length; i++) {
-    const len = Math.max(normalized[i].length, 1);
-    const s = acc;
-    const e = acc + len;
-    if (e > idx && s < idx + needle.length) out.push(targets[i]);
-    acc += len;
+  // Ruta 1: coincidencia contigua a lo largo de todas las páginas unidas.
+  const globalStarts = [];
+  let globalAcc = 0;
+  for (const p of pageSpans) { globalStarts.push(globalAcc); globalAcc += p.total; }
+  const allText = pageSpans.map(p => p.normalized.join('')).join('');
+  const idx = allText.indexOf(needle);
+
+  if (idx >= 0) {
+    for (let p = 0; p < pageSpans.length; p++) {
+      const ps = pageSpans[p];
+      const pageGlobStart = globalStarts[p];
+      const pageGlobEnd = pageGlobStart + ps.total;
+      if (pageGlobEnd <= idx || pageGlobStart >= idx + needle.length) continue;
+      const spans = [];
+      for (let i = 0; i < ps.normalized.length; i++) {
+        const e = ps.offsets[i] + Math.max(ps.normalized[i].length, 1);
+        const gs = pageGlobStart + ps.offsets[i];
+        const ge = pageGlobStart + e;
+        if (ge > idx && gs < idx + needle.length) spans.push(ps.targets[i]);
+      }
+      if (spans.length) out.set(rendered[p].n, spans);
+    }
+    if (out.size > 0) return out;
   }
+
+  // Ruta 2: buscar por página cada línea del fragmento (tolerante a cruces de página).
+  const lines = (fragmentText || '').split('\n').map(l => norm(l.trim())).filter(Boolean);
+  if (lines.length === 0) return out;
+
+  for (let p = 0; p < pageSpans.length; p++) {
+    const ps = pageSpans[p];
+    const pageText = ps.normalized.join('');
+    const hit = new Set();
+    for (const line of lines) {
+      const ix = pageText.indexOf(line);
+      if (ix < 0) continue;
+      for (let i = 0; i < ps.normalized.length; i++) {
+        const e = ps.offsets[i] + Math.max(ps.normalized[i].length, 1);
+        if (e > ix && ps.offsets[i] < ix + line.length) hit.add(ps.targets[i]);
+      }
+    }
+    if (hit.size) out.set(rendered[p].n, Array.from(hit));
+  }
+
   return out;
 }
 

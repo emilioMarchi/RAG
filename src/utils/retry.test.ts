@@ -30,7 +30,7 @@ describe('withRetry', () => {
   it('should use longer delay for rate limit errors', async () => {
     const fn = vi.fn().mockRejectedValue(new Error('429 Too Many Requests'))
     await expect(
-      withRetry(fn, { maxRetries: 2, baseDelay: 100 })
+      withRetry(fn, { maxRetries: 2, baseDelay: 100, rateLimitDelay: 50 })
     ).rejects.toThrow('429')
   })
 })

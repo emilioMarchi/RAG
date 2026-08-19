@@ -286,5 +286,81 @@ export function createQueryRouter(
     }
   });
 
+  /**
+   * POST /api/query/debug
+   * Devuelve los chunks que el hybrid search recupera (sin reranking ni expansión),
+   * para comparar con lo almacenado en /documents/:id/chunks.
+   */
+  router.post('/query/debug', async (req: Request, res: Response) => {
+    try {
+      const { query: userQuery, limit, vectorWeight, bm25Weight } = req.body;
+
+      if (!userQuery || typeof userQuery !== 'string' || userQuery.trim().length === 0) {
+        res.status(400).json({ error: 'Se requiere una consulta válida' });
+        return;
+      }
+
+      const { HybridSearchService } = await import('../services/hybridSearchService.js');
+      const { EmbeddingService } = await import('../services/embeddingService.js');
+      const hybridSearch = new HybridSearchService();
+      const embedder = new EmbeddingService();
+
+      const highVector = await embedder.generateEmbedding(userQuery.trim(), 1536);
+      const hits = await hybridSearch.search(
+        [],
+        highVector,
+        userQuery.trim(),
+        limit || 20,
+        vectorWeight ?? 0.6,
+        bm25Weight ?? 0.4
+      );
+
+      // Enriquecer con texto original y contexto para ver qué se está buscando
+      const ids = hits.map(h => h.id);
+      const full = await query<{
+        id: string;
+        document_id: string;
+        paragraph_index: number;
+        raw_content: string;
+        contextualized_text: string;
+        parent_chunk_id: string | null;
+        doc_title: string;
+        metadata: { contextPath?: string; location?: Record<string, unknown> };
+      }>(
+        `SELECT p.id, p.document_id, p.paragraph_index, p.raw_content,
+                p.contextualized_text, p.parent_chunk_id,
+                d.title as doc_title, p.metadata
+         FROM document_paragraphs p
+         JOIN documents d ON p.document_id = d.id
+         WHERE p.id = ANY($1::uuid[])`,
+        [ids]
+      );
+
+      const fullMap = new Map(full.rows.map(r => [r.id, r]));
+      const enriched = hits.map(h => {
+        const f = fullMap.get(h.id);
+        return {
+          id: h.id,
+          score: h.hybrid_score,
+          docTitle: f?.doc_title,
+          paragraphIndex: f?.paragraph_index,
+          parentChunkId: f?.parent_chunk_id,
+          contextPath: f?.metadata?.contextPath ?? null,
+          location: f?.metadata?.location ?? null,
+          rawPreview: f?.raw_content?.substring(0, 300),
+          ctxPreview: f?.contextualized_text?.substring(0, 300),
+        };
+      });
+
+      res.json({ query: userQuery.trim(), results: enriched });
+    } catch (error) {
+      console.error('Debug query error:', error);
+      res.status(500).json({
+        error: 'Error en debug query',
+        details: error instanceof Error ? error.message : 'Unknown error',
+      });
+    }
+  });
+
   return router;
 }

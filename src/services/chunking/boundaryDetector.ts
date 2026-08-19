@@ -13,7 +13,7 @@
  * `locateOnOriginal` traducirá los offsets al archivo real (ver plan §5.1).
  */
 
-export type BoundaryKind = 'heading' | 'numbered' | 'paragraph' | 'list' | 'page';
+export type BoundaryKind = 'heading' | 'numbered' | 'paragraph' | 'list' | 'item' | 'page';
 
 export interface BoundaryMatch {
   /** Offset (en el texto preparado) donde comienza la frontera */
@@ -28,12 +28,15 @@ export interface BoundaryMatch {
 const HEADING_RE = /^#{1,6}\s+/;
 const PDF_HEADING_RE = /^\d+(\.\d+)*[\.\):]?\s|\b[A-Z][A-Za-zÀ-ÿ0-9 ]{3,50}:$/;
 const NUMERIC_LINE_RE = /^\s*(?:\d{1,4}[.)]|[ivxlcdmIVXLCDM]+[.)]|art(?:ículo|iculo)?\.?\s*\d+)/i;
+/** Inciso de artículo en minúscula ("a)", "b.", "aa)") — frontera de sub-división. */
+const ITEM_LINE_RE = /^\s*[a-z]{1,2}[.)]\s/;
 const LIST_LINE_RE = /^\s*(?:[-*•·])\s+/;
 const PAGE_BREAK = '\f';
 
 /** Especificidad para deduplicar varias fronteras en el mismo offset. */
 const KIND_RANK: Record<BoundaryKind, number> = {
   numbered: 5,
+  item: 4,
   heading: 4,
   list: 3,
   paragraph: 2,
@@ -46,7 +49,7 @@ export interface BoundaryOptions {
 }
 
 export function detectBoundaries(text: string, opts: BoundaryOptions = {}): BoundaryMatch[] {
-  const allow = new Set<BoundaryKind>(opts.kinds ?? ['heading', 'numbered', 'paragraph', 'list', 'page']);
+  const allow = new Set<BoundaryKind>(opts.kinds ?? ['heading', 'numbered', 'paragraph', 'list', 'item', 'page']);
 
   const boundaries: BoundaryMatch[] = [];
   const push = (m: BoundaryMatch) => {
@@ -69,7 +72,7 @@ export function detectBoundaries(text: string, opts: BoundaryOptions = {}): Boun
     }
   }
 
-  // 3. Líneas estructurales: encabezado, numeración legal, ítems de lista.
+  // 3. Líneas estructurales: encabezado, numeración legal, incisos, ítems de lista.
   for (const ls of lineStarts(text)) {
     const line = text.slice(ls.offset, ls.endOffset);
     const trimmed = line.trim();
@@ -80,6 +83,9 @@ export function detectBoundaries(text: string, opts: BoundaryOptions = {}): Boun
     // casar con PDF_HEADING_RE (`^\d+...\s`); queremos la categoría más específica.
     if (NUMERIC_LINE_RE.test(line)) {
       push({ start: ls.offset, end: ls.endOffset, kind: 'numbered', label });
+    } else if (ITEM_LINE_RE.test(line)) {
+      // Incisos en minúscula ("a)", "b.") → frontera de sub-división de artículo.
+      push({ start: ls.offset, end: ls.endOffset, kind: 'item', label });
     } else if (HEADING_RE.test(line) || PDF_HEADING_RE.test(line)) {
       push({ start: ls.offset, end: ls.endOffset, kind: 'heading', label });
     } else if (LIST_LINE_RE.test(line)) {

@@ -1,18 +1,29 @@
 import type { LLMService } from './llmService.js';
 import type { ScoredChunk } from './hybridSearchService.js';
 
+export type RerankStrategy = 'hybrid' | 'llm';
+
 /**
  * RerankingService
  *
- * Toma un pool amplio de candidatos (ej. top-20) y usa el LLM como cross-encoder
- * para puntuar la relevancia cruzada de cada fragmento respecto a la query original.
- * Devuelve los top-N mejor rankeados.
+ * Toma un pool amplio de candidatos (ej. top-20) y produce los top-N mejor
+ * rankeados según la estrategia configurada:
+ *
+ * - 'hybrid' (default, determinista y SIN llamada LLM): reordena por el
+ *   `hybrid_score` ya calculado por RRF (coseno + BM25) y toma el top-N.
+ *   Es instantáneo y no incurre en latencia/costo de red.
+ *
+ * - 'llm': usa el LLM como cross-encoder para puntuar la relevancia cruzada
+ *   de cada fragmento respecto a la query original. Más preciso pero lento.
  */
 export class RerankingService {
-  constructor(private llm: LLMService) {}
+  constructor(
+    private llm: LLMService | null = null,
+    private strategy: RerankStrategy = 'hybrid'
+  ) {}
 
   /**
-   * Re-rankea los candidatos usando el LLM como cross-encoder.
+   * Re-rankea los candidatos y devuelve los top-N.
    *
    * @param userQuery   Consulta original del usuario
    * @param candidates  Pool amplio de fragmentos candidatos (ej. 20)
@@ -24,6 +35,18 @@ export class RerankingService {
     topN: number = 7
   ): Promise<ScoredChunk[]> {
     if (candidates.length <= topN) return candidates;
+
+    if (this.strategy === 'hybrid') {
+      // Ya vienen ordenados por hybrid_score (RRF), pero ordenamos por seguridad.
+      return [...candidates]
+        .sort((a, b) => b.hybrid_score - a.hybrid_score)
+        .slice(0, topN);
+    }
+
+    // Estrategia 'llm': cross-encoder con el LLM.
+    if (!this.llm) {
+      return candidates.slice(0, topN);
+    }
 
     const scores = await this.llm.rerankChunks(userQuery, candidates);
 

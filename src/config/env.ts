@@ -35,8 +35,25 @@ export const env = {
 
   // RAG iterativo (motor compartido por /api/query/iterative y el agente)
   RAG_MAX_ITERATIONS: parseInt(process.env.RAG_MAX_ITERATIONS || '4', 10),
+  // Estrategia de re-ranking: 'hybrid' (determinista, sin LLM, default) | 'llm' (cross-encoder).
+  RAG_RERANK_STRATEGY: (process.env.RAG_RERANK_STRATEGY || 'hybrid') as 'hybrid' | 'llm',
   RAG_ENABLE_RERANKING: (process.env.RAG_ENABLE_RERANKING ?? 'true') === 'true',
-  RAG_ENABLE_CRAG: (process.env.RAG_ENABLE_CRAG ?? 'true') === 'true',
+  // Corrective RAG: nº máximo de pases de re-búsqueda (0 = desactivado). Default 0.
+  RAG_CRAG_MAX_PASSES: parseInt(process.env.RAG_CRAG_MAX_PASSES || '0', 10),
+  // Bucle de expansión de contexto (evaluateContext): true si se evalúa el contexto
+  // con LLM para ampliar párrafos adyacentes. Default false (evita una llamada LLM cara).
+  RAG_ENABLE_CONTEXT_EXPANSION: (process.env.RAG_ENABLE_CONTEXT_EXPANSION ?? 'false') === 'true',
+  // Decomposición de query con LLM (true) o heurística directa (false).
+  RAG_ENABLE_DECOMPOSE: (process.env.RAG_ENABLE_DECOMPOSE ?? 'true') === 'true',
+  // Presupuesto global de latencia (ms) para una consulta. 0 = sin límite.
+  // IMPORTANTE: un valor bajo (p. ej. 45000) NO cancela el pipeline: las llamadas
+  // LLM/embedding ya iniciadas siguen ejecutándose y, al expirar, lanzan
+  // QueryTimeoutError que rompe/aborta la respuesta RAG por completo. Se deja en 0
+  // (sin límite) por defecto para que la consulta siempre termine.
+  RAG_TIMEOUT_MS: parseInt(process.env.RAG_TIMEOUT_MS || '0', 10),
+  // Espera (ms) por reintento ante rate-limit (429) del LLM. Bajo para no colgarse
+  // con modelos free que rate-limitan seguido. Default 10000.
+  RAG_RATE_LIMIT_RETRY_MS: parseInt(process.env.RAG_RATE_LIMIT_RETRY_MS || '10000', 10),
 
   // Agente conversacional
   AGENT_MAX_TURNS: parseInt(process.env.AGENT_MAX_TURNS || '10', 10),

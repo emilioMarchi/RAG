@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { detectBoundaries, BoundaryKind } from './chunking/boundaryDetector.js';
+import { normativeOutline, OutlineNode } from './chunking/normativeContext.js';
 
 interface PdfTextItemLike {
   str?: string;
@@ -29,6 +30,10 @@ const PDF_MAX_FRAGMENT_CHARS = 1200;
 const PDF_HEADING_RE = /^\d+(\.\d+)*[\.\):]?\s|\b[A-Z][A-Za-zÀ-ÿ0-9 ]{3,50}:$/;
 const PDF_INDEX_LINE_RE = /^\d+(\.\d+)*[.)]?\s+[A-Za-zÀ-ÿ0-9].{0,140}$/;
 const PDF_FOOTER_RE = /^-+\s*\d+\s+of\s+\d+\s*-+$/i;
+// Encabezado estructural que abre el cuerpo de un documento legal (y tras el cual
+// deja de existir tabla de contenidos). Se usa para no eliminar, por error, las
+// enumeraciones internas de los artículos (ver splitPDF).
+const PDF_STRUCTURAL_HEADING_RE = /^\b(ART[IÍ]CULO|CAP[IÍ]TULO|T[IÍ]TULO|SECCI[OÓ]N|ANEXO|Anexo|Cap[íi]tulo|T[íi]tulo|Secci[óo]n)\b/i;
 const MIN_OCR_TEXT_LENGTH = 20;
 const OCR_SCALE = 2;
 const OCR_LANG = process.env.OCR_LANG || 'spa';
@@ -58,10 +63,23 @@ export interface ChunkLocation {
   startLine?: number;
   endLine?: number;
   boundingBoxes?: BoundingBox[];
+  /** Páginas completas alcanzadas por el fragmento, cada una con sus rectángulos.
+   *  Permite resaltar un chunk que cruza un límite de página en lugar de una sola
+   *  página. `pageNumber`/`boundingBoxes` apuntan a la primera página (retrocompat). */
+  boxesByPage?: Array<{ pageNumber: number; boxes: BoundingBox[] }>;
   /** Fase 5: rango útil SIN overlap (núcleo del chunk). Presente cuando el fragmento
    *  fue ampliado hacia atrás por overlap; el visor resalta este rango por defecto. */
   coreStartChar?: number;
   coreEndChar?: number;
+}
+
+/** Resultado interno de los localizadores por offset/contenido. */
+interface LocatedResult {
+  pageNumber: number;
+  startChar?: number;
+  endChar?: number;
+  boundingBoxes?: BoundingBox[];
+  boxesByPage?: Array<{ pageNumber: number; boxes: BoundingBox[] }>;
 }
 
 /** Ítem de la capa de texto de un PDF con su caja delimitadora normalizada */
@@ -165,13 +183,29 @@ export class ChunkingService {
 
     // Buscamos el bloque de índice: 2+ líneas de encabezado consecutivas que
     // contengan solo título (sin cuerpo). Marcar esas líneas para descartarlas.
+    //
+    // FIX: un índice real de un documento legal está al PRINCIPIO. Las enumeraciones
+    // internas de un artículo (p. ej. "2. La recolección de datos...", "4. Los datos
+    // deben ser exactos...") también matchean PDF_HEADING_RE + PDF_INDEX_LINE_RE y se
+    // confundían con un índice, por lo que se ELIMINABAN líneas de contenido real
+    // (artículos enteros quedaban sin sus puntos). Para evitar esa pérdida, la
+    // eliminación de TOC solo aplica ANTES de ver el primer encabezado estructural
+    // (ARTICULO/CAPITULO/TITULO/SECCION...), que a efectos prácticos siempre abre
+    // el cuerpo del documento.
     const skip = new Set<number>();
+    let seenBody = false;
     for (let i = 0; i < lines.length - 1; i++) {
       const cur = lines[i];
       const nxt = lines[i + 1];
+      if (seenBody) break; // tras el cuerpo ya no hay tabla de contenidos que eliminar
       const curIsHeading = PDF_HEADING_RE.test(cur);
       const curIsIndexLine = PDF_INDEX_LINE_RE.test(cur);
       const nxtIsHeading = PDF_HEADING_RE.test(nxt);
+      const startsBody = PDF_STRUCTURAL_HEADING_RE.test(cur);
+      if (startsBody) {
+        seenBody = true;
+        break;
+      }
       if (curIsHeading && curIsIndexLine && nxtIsHeading) {
         skip.add(i);
       }
@@ -469,19 +503,22 @@ export class ChunkingService {
       parentMaxChars?: number; childMaxChars?: number; childMinChars?: number; pages?: PdfPage[];
       /** Fase 7: tamaño máx. por segmento (adaptativo). Si se omite → tamaño fijo (cero regresión). */
       sizeFor?: (segment: { text: string }) => number;
+      /** Partición de parents provista externamente (p. ej. uno por ARTICULO en normativas).
+       *  Si se omite → `splitSlices(text, parentMaxChars, ...)` (comportamiento actual). */
+      parentSlices?: Array<{ text: string; start: number }>;
     } = {}
   ): HierarchicalChunks {
-    const { parentMaxChars = 1800, childMaxChars = 450, childMinChars = 80, pages, sizeFor } = options;
+    const { parentMaxChars = 1800, childMaxChars = 450, childMinChars = 80, pages, sizeFor, parentSlices } = options;
     const lineIndex = this.buildLineIndex(text);
 
     // 1. Obtener parent chunks: bloques grandes (con offsets sobre `text`)
-    const parentSlices = this.splitSlices(text, parentMaxChars, mimeType, sizeFor);
+    const parentSlicesResolved = parentSlices ?? this.splitSlices(text, parentMaxChars, mimeType, sizeFor);
 
     const parents: ParentChunk[] = [];
     const children: ChildChunk[] = [];
     let globalChildIndex = 0;
 
-    parentSlices.forEach((parentSlice, parentIndex) => {
+    parentSlicesResolved.forEach((parentSlice, parentIndex) => {
       const startChildIndex = globalChildIndex;
 
       // 2. Dividir cada parent en children más pequeños. Los fragmentos que queden
@@ -498,7 +535,7 @@ export class ChunkingService {
           text: childSlice.text,
           childIndex: globalChildIndex,
           parentIndex,
-          location: this.computeLocation(text, cStart, cEnd, lineIndex, pages),
+          location: this.computeLocation(text, cStart, cEnd, lineIndex, pages, childSlice.text),
         });
         globalChildIndex++;
       }
@@ -521,7 +558,8 @@ export class ChunkingService {
     start: number,
     end: number,
     lineIndex: number[],
-    pages?: PdfPage[]
+    pages?: PdfPage[],
+    childText?: string
   ): ChunkLocation {
     const clamp = (v: number) => Math.max(0, Math.min(text.length, v));
     const s = clamp(start);
@@ -532,10 +570,20 @@ export class ChunkingService {
     loc.endLine = this.lineForOffset(lineIndex, e);
 
     if (pages && pages.length > 0) {
-      const found = this.locateInPages(pages, text.slice(s, e));
-      if (found) {
-        loc.pageNumber = found.pageNumber;
-        if (found.boundingBoxes) loc.boundingBoxes = found.boundingBoxes;
+      // Prioridad: localizar por CONTENIDO exacto del fragmento (robusto ante los
+      // offsets aproximados que produce la rama PDF del splitter). Si no encuentra
+      // ninguna línea (o no hay texto), cae a la localización determinista por offset.
+      const found =
+        childText && childText.trim().length > 0
+          ? this.locateByContent(pages, childText)
+          : undefined;
+      const resolved = found ?? this.locateByOffsets(pages, s, e);
+      if (resolved) {
+        loc.pageNumber = resolved.pageNumber;
+        if (resolved.startChar != null) loc.startChar = resolved.startChar;
+        if (resolved.endChar != null) loc.endChar = resolved.endChar;
+        if (resolved.boundingBoxes) loc.boundingBoxes = resolved.boundingBoxes;
+        if (resolved.boxesByPage) loc.boxesByPage = resolved.boxesByPage;
       }
     }
     return loc;
@@ -546,13 +594,19 @@ export class ChunkingService {
    * Recibe los offsets del fragmento en el texto preparado y el mapa que los traduce
    * a offsets del texto original (producido por la estrategia). Así los números de
    * línea / página / caja quedan siempre referidos al archivo que ve el usuario.
+   *
+   * La localización se resuelve por OFFSET (determinista): un [origStart, origEnd)
+   * sobre el texto plano original se traduce a páginas y bounding boxes usando el
+   * mismo layout que generó el chunk, SIN re-buscar texto. Evita el mismatch que
+   * producía la búsqueda difusa cuando la limpieza unía palabras o colapsaba saltos.
    */
   public locateOnOriginal(
     originalText: string,
     pages: PdfPage[] | undefined,
     preparedStart: number,
     preparedEnd: number,
-    offsetMap: (i: number) => number
+    offsetMap: (i: number) => number,
+    chunkText?: string
   ): ChunkLocation {
     const clamp = (v: number) => Math.max(0, Math.min(originalText.length, v));
     const origStart = clamp(offsetMap(preparedStart));
@@ -564,11 +618,19 @@ export class ChunkingService {
     loc.endLine = this.lineForOffset(lineIndex, origEnd);
 
     if (pages && pages.length > 0) {
-      const needle = originalText.slice(origStart, origEnd);
-      const found = this.locateInPages(pages, needle);
-      if (found) {
-        loc.pageNumber = found.pageNumber;
-        if (found.boundingBoxes) loc.boundingBoxes = found.boundingBoxes;
+      // Prioridad: localizar por CONTENIDO exacto del fragmento (robusto ante offsets
+      // aproximados del splitter PDF). Cae a offsets deterministas si no hay texto.
+      const found =
+        chunkText && chunkText.trim().length > 0
+          ? this.locateByContent(pages, chunkText)
+          : undefined;
+      const resolved = found ?? this.locateByOffsets(pages, origStart, origEnd);
+      if (resolved) {
+        loc.pageNumber = resolved.pageNumber;
+        if (resolved.startChar != null) loc.startChar = resolved.startChar;
+        if (resolved.endChar != null) loc.endChar = resolved.endChar;
+        if (resolved.boundingBoxes) loc.boundingBoxes = resolved.boundingBoxes;
+        if (resolved.boxesByPage) loc.boxesByPage = resolved.boxesByPage;
       }
     }
     return loc;
@@ -593,35 +655,83 @@ export class ChunkingService {
     return lo + 1; // 1-indexed
   }
 
-  private locateInPages(
+  /**
+   * Localiza un fragmento por SUS OFFSETS sobre el texto plano original, de forma
+   * DETERMINISTA (sin re-buscar texto). Replica el layout exacto de `buildFlatText`
+   * (cada página `trimEnd()` + separador PAGE_SEP) para traducir [globalStart, globalEnd)
+   * a páginas y, dentro de cada una, a bounding boxes vía sus `ranges` (coordenadas 0..1).
+   *
+   * Evita el problema histórico: cuando la estrategia limpia el texto (une palabras con
+   * guión, colapsa saltos) la búsqueda difusa por texto caía en líneas parciales o del
+   * fragmento anterior. Aquí el offset ya está mapeado al texto original por la estrategia,
+   * así que la posición es exacta.
+   */
+  private locateByOffsets(
     pages: PdfPage[],
-    raw: string
-  ): { pageNumber: number; boundingBoxes?: BoundingBox[] } | undefined {
-    const needle = raw.trim();
-    if (!needle) return pages.length > 0 ? { pageNumber: pages[0].pageNumber } : undefined;
+    globalStart: number,
+    globalEnd: number
+  ): LocatedResult | undefined {
+    if (!pages || pages.length === 0) return undefined;
 
-    for (const page of pages) {
-      const idx = page.text.indexOf(needle);
-      if (idx >= 0) {
-        const boxes = this.unionRanges(page.ranges, idx, idx + needle.length);
-        return { pageNumber: page.pageNumber, boundingBoxes: boxes };
-      }
-      // Intento insensible a espacios/distribución de líneas (muy común cuando la
-      // estrategia limpió el texto: saltos de línea y espaciados difieren del PDF).
-      const norm = this.findNormalized(page.text, needle);
-      if (norm) {
-        const boxes = this.unionRanges(page.ranges, norm.start, norm.end);
-        return { pageNumber: page.pageNumber, boundingBoxes: boxes };
+    const trimLens = pages.map(p => p.text.trimEnd().length);
+    // offset de arranque de cada página en el texto plano global (mainmismo que buildFlatText).
+    const pageStarts: number[] = [];
+    let acc = 0;
+    for (const len of trimLens) {
+      pageStarts.push(acc);
+      acc += len + PAGE_SEP.length;
+    }
+    const flatLen = acc; // longitud total (≤ originalText.length, coincidente por construcción)
+
+    const clampG = (v: number) => Math.max(0, Math.min(flatLen, v));
+    const s = clampG(globalStart);
+    const e = clampG(globalEnd);
+
+    const boxesByPage: Array<{ pageNumber: number; boxes: BoundingBox[] }> = [];
+    for (let i = 0; i < pages.length; i++) {
+      const gs = pageStarts[i];
+      const ge = gs + trimLens[i];
+      const lo = Math.max(s, gs);
+      const hi = Math.min(e, ge);
+      if (lo >= hi) continue; // sin solape con esta página (o solape en el separador)
+
+      const localStart = lo - gs;
+      const localEnd = hi - gs;
+      const boxes = this.unionRanges(pages[i].ranges, localStart, localEnd);
+      if (boxes && boxes.length > 0) {
+        boxesByPage.push({ pageNumber: pages[i].pageNumber, boxes });
       }
     }
 
-    const firstLine = needle.split('\n')[0].trim();
-    if (firstLine) {
-      for (const page of pages) {
-        if (page.text.includes(firstLine)) return { pageNumber: page.pageNumber };
-      }
+    if (boxesByPage.length === 0) {
+      // Sin items localizables (p. ej. página OCR): al menos devolvemos la página del offset.
+      const firstPage = this.pageForOffset(pages, pageStarts, s);
+      return firstPage != null ? { pageNumber: firstPage } : undefined;
     }
-    return pages.length > 0 ? { pageNumber: pages[0].pageNumber } : undefined;
+
+    return {
+      pageNumber: boxesByPage[0].pageNumber,
+      boundingBoxes: boxesByPage[0].boxes,
+      boxesByPage,
+    };
+  }
+
+  private pageForOffset(pages: PdfPage[], pageStarts: number[], globalOffset: number): number | null {
+    for (let i = pages.length - 1; i >= 0; i--) {
+      if (globalOffset >= pageStarts[i]) return pages[i].pageNumber;
+    }
+    return pages.length > 0 ? pages[0].pageNumber : null;
+  }
+
+  private unionRanges(ranges: PdfPage['ranges'], localStart: number, localEnd: number): BoundingBox[] | undefined {
+    // Agrupar los items del fragmento en filas (líneas) por solape vertical, de modo
+    // que el resaltado abrace cada línea de texto en lugar de un único rectángulo grande.
+    const matched = ranges
+      .filter(r => r.start < localEnd && r.end > localStart)
+      .map(r => r.item)
+      .sort((a, b) => a.y - b.y || a.x - b.x);
+
+    return this.unionItems(matched);
   }
 
   /** Busca `needle` en `haystack` ignorando el espacio en blanco, devolviendo los
@@ -644,19 +754,99 @@ export class ChunkingService {
     return { start, end };
   }
 
-  private unionRanges(ranges: PdfPage['ranges'], localStart: number, localEnd: number): BoundingBox[] | undefined {
-    // Agrupar los items del fragmento en filas (líneas) por solape vertical, de modo
-    // que el resaltado abrace cada línea de texto en lugar de un único rectángulo grande.
-    const matched = ranges
-      .filter(r => r.start < localEnd && r.end > localStart)
-      .map(r => r.item)
-      .sort((a, b) => a.y - b.y || a.x - b.x);
+  /**
+   * Localiza un fragmento por el CONTENIDO de sus líneas reales dentro de cada página.
+   * Se usa para PDFs, donde el chunking arma fragmentos por líneas (con filtros de
+   * TOC/footer y reensamble), de modo que los offsets del chunk NO reproducen el offset
+   * real en el texto plano y defasarían el resaltado. Aquí se busca cada línea del chunk
+   * por coincidencia (insensible a espacios múltiples) avanzando por las páginas en
+   * orden, lo que garantiza que la marca sigue exactamente el texto leído en la interfaz.
+   */
+  private locateByContent(
+    pages: PdfPage[],
+    chunkText: string
+  ): LocatedResult | undefined {
+    if (!pages || pages.length === 0) return undefined;
 
-    if (matched.length === 0) return undefined;
+    const lines = chunkText.split('\n').map(l => l.trim()).filter(Boolean);
+    if (lines.length === 0) return { pageNumber: pages[0].pageNumber };
+
+    // offset de arranque (en texto plano global, layout buildFlatText) de cada página.
+    const pageStarts: number[] = [];
+    {
+      let acc = 0;
+      for (const p of pages) {
+        pageStarts.push(acc);
+        acc += p.text.trimEnd().length + PAGE_SEP.length;
+      }
+    }
+
+    let pageCursor = 0; // las líneas del chunk deben aparecer en orden de página
+    const perPage = new Map<number, Array<{ start: number; end: number }>>();
+    let matchedAny = false;
+    let minGlobal: number | null = null;
+    let maxGlobal: number | null = null;
+
+    for (const line of lines) {
+      let foundPage = -1;
+      let foundRange: { start: number; end: number } | null = null;
+      for (let p = pageCursor; p < pages.length; p++) {
+        const norm = this.findNormalized(pages[p].text, line);
+        if (norm) { foundPage = p; foundRange = norm; break; }
+      }
+      // Una línea puede fallar si sufrió limpieza/reespaciado; se descarta sin abortar.
+      if (foundPage < 0 || !foundRange) continue;
+      pageCursor = foundPage;
+      matchedAny = true;
+      if (!perPage.has(foundPage)) perPage.set(foundPage, []);
+      perPage.get(foundPage)!.push(foundRange);
+      const gStart = pageStarts[foundPage] + foundRange.start;
+      const gEnd = pageStarts[foundPage] + foundRange.end;
+      if (minGlobal == null || gStart < minGlobal) minGlobal = gStart;
+      if (maxGlobal == null || gEnd > maxGlobal) maxGlobal = gEnd;
+    }
+
+    if (!matchedAny) return { pageNumber: pages[0].pageNumber };
+    // Offsets EXACTOS re-derivados de la posición real de las líneas en el texto
+    // plano, de modo que slice(startChar, endChar) reproduzca el texto visible.
+    const startChar = minGlobal ?? 0;
+    const endChar = maxGlobal ?? 0;
+
+    const boxesByPage = [...perPage.entries()]
+      .filter(([, ranges]) => ranges.length > 0)
+      .map(([pageIdx, ranges]) => {
+        const page = pages[pageIdx];
+        const matched = page.ranges.filter(r => ranges.some(({ start, end }) => r.start < end && r.end > start));
+        const boxes = this.unionItems(matched.map(m => m.item));
+        return { pageNumber: page.pageNumber, boxes };
+      })
+      .filter(p => p.boxes.length > 0);
+
+    if (boxesByPage.length === 0) {
+      const first = perPage.keys().next().value as number | undefined;
+      return {
+        pageNumber: first != null ? pages[first].pageNumber : pages[0].pageNumber,
+        startChar,
+        endChar,
+      };
+    }
+
+    return {
+      pageNumber: boxesByPage[0].pageNumber,
+      startChar,
+      endChar,
+      boundingBoxes: boxesByPage[0].boxes,
+      boxesByPage,
+    };
+  }
+
+  /** Une los bounding boxes de una serie de ítems agrupándolos por fila (solape vertical). */
+  private unionItems(items: PdfTextItem[]): BoundingBox[] {
+    if (items.length === 0) return [];
 
     const OVERLAP = 0.4;
     const rows: Array<{ minX: number; minY: number; maxX: number; maxY: number }> = [];
-    for (const it of matched) {
+    for (const it of items) {
       const top = it.y;
       const bottom = it.y + it.height;
       const row = rows.find(r => {
@@ -812,6 +1002,153 @@ export class ChunkingService {
     emitJoined();
 
     return out.filter(s => s.text.trim().length >= minChars);
+  }
+
+  /**
+   * Partición por ARTÍCULO para documentos normativos (estrategia legal).
+   *
+   * Reglas de corte (sobre el texto PREPARADO):
+   * - Un parent chunk por ARTICULO, desde el inicio del artículo hasta el inicio
+   *   del siguiente. Los artículos NUNCA se agrupan aunque sean cortos.
+   * - Los encabezados jerárquicos (LEY, TITULO, CAPITULO, SECCION, DISPOSICIONES)
+   *   se adhieren al artículo que los sigue: el chunk comienza en el primero de
+   *   la cadena de encabezados contiguos que preceden al artículo. Así un
+   *   "TITULO II" nunca queda huérfano ni se cuela en el chunk del artículo
+   *   anterior. Si hay cuerpo de texto entre encabezado y artículo en el medio
+   *   del documento, el título abre chunk propio con ese cuerpo (introducción
+   *   de sección); si el cuerpo precede al PRIMER artículo es el preámbulo y
+   *   queda como chunk independiente (no se fusiona con el artículo).
+   * - ANEXO inicia su propio chunk (aunque no haya artículos después).
+   * - El preámbulo (cabecera + considerandos) es un chunk propio.
+   * - Un artículo que excede `maxChars` se sub-divide con `splitStructural`
+   *   (fronteras internas + corte por oración), manteniendo su encabezado en
+   *   el primer trozo.
+   * - En PDFs se descartan las líneas del índice (TOC): corridas de ≥4 líneas
+   *   estructurales consecutivas sin cuerpo que terminan en número de página.
+   *
+   * Devuelve `undefined` cuando no hay ARTICULO/ANEXO → el llamador cae al
+   * split por tamaño actual (cero regresión para textos sin articulación).
+   */
+  public splitByArticles(
+    text: string,
+    opts: { maxChars?: number; minChars?: number; mimeType?: string } = {}
+  ): Array<{ text: string; start: number }> | undefined {
+    const nodes = normativeOutline(text);
+    if (!nodes.some(n => n.level === 'articulo' || n.level === 'anexo')) return undefined;
+
+    const isPdf = !!opts.mimeType && this.isPDF(opts.mimeType);
+    const toc = this.tocNodeStarts(text, nodes, isPdf);
+
+    // Fronteras de chunk: [0, ...] + fin. Cada frontera es un inicio de línea.
+    const cuts: number[] = [0];
+    let pendingHeadings: OutlineNode[] = [];
+    let seenArticle = false;
+    for (const n of nodes) {
+      if (toc.has(n.start)) {
+        pendingHeadings = [];
+        continue;
+      }
+      if (n.level === 'anexo') {
+        cuts.push(n.start);
+        pendingHeadings = [];
+      } else if (n.level === 'articulo') {
+        // El run de encabezados se adhiere al artículo salvo que haya cuerpo entre
+        // el encabezado y el artículo y además sea el PRIMER artículo: en ese caso
+        // el bloque previo es el preámbulo (ej. "LEY ... / considerandos / ART 1")
+        // y no debe fusionarse con el artículo.
+        const hang = pendingHeadings.length > 0;
+        const attach =
+          hang && (seenArticle || !this.hasBodyBetween(text, pendingHeadings[pendingHeadings.length - 1], n));
+        cuts.push(attach ? pendingHeadings[0].start : n.start);
+        pendingHeadings = [];
+        seenArticle = true;
+      } else if (this.isHeadingLevel(n.level)) {
+        // Encabezado: si hay cuerpo entre el último encabezado y este, el run
+        // anterior se cierra sin volverse frontera (era parte del chunk previo).
+        if (pendingHeadings.length > 0 && this.hasBodyBetween(text, pendingHeadings[pendingHeadings.length - 1], n)) {
+          pendingHeadings = [];
+        }
+        pendingHeadings.push(n);
+      }
+    }
+    cuts.push(text.length);
+
+    const maxChars = opts.maxChars ?? Number.MAX_SAFE_INTEGER;
+    const minChars = opts.minChars ?? 1;
+    const slices: Array<{ text: string; start: number }> = [];
+    for (let i = 0; i < cuts.length - 1; i++) {
+      const start = cuts[i];
+      const end = cuts[i + 1];
+      if (end - start <= 0) continue;
+      const raw = text.slice(start, end);
+      const ns = raw.search(/\S/);
+      const ne = raw.search(/\s*$/);
+      if (ns < 0 || ne <= ns) continue; // span vacío/espacios
+      const trimmed = raw.slice(ns, ne);
+
+      if (trimmed.length > maxChars) {
+        // Artículo gigante (o preámbulo): sub-división estructural interna.
+        for (const piece of this.splitStructural(raw, maxChars, { minChars })) {
+          slices.push({ text: piece.text, start: start + piece.start });
+        }
+      } else if (trimmed.length >= minChars) {
+        slices.push({ text: trimmed, start: start + ns });
+      }
+    }
+    return slices;
+  }
+
+  /** Niveles de encabezado que pueden abrir un chunk de sección. */
+  private isHeadingLevel(level: OutlineNode['level']): boolean {
+    return level === 'ley' || level === 'decreto' || level === 'titulo' || level === 'capitulo' || level === 'seccion';
+  }
+
+  /** ¿Hay texto (cuerpo) entre la línea de `a` y la línea de `b`? */
+  private hasBodyBetween(text: string, a: OutlineNode, b: OutlineNode): boolean {
+    const endA = this.lineEndOffset(text, a.start);
+    if (b.start <= endA + 1) return false;
+    return text.slice(endA + 1, b.start).trim().length > 0;
+  }
+
+  private lineEndOffset(text: string, offset: number): number {
+    const nl = text.indexOf('\n', offset);
+    return nl < 0 ? text.length : nl;
+  }
+
+  /**
+   * Detecta líneas de índice (TOC) en PDFs: corridas de ≥4 nodos estructurales
+   * consecutivos (sin cuerpo entre líneas) que terminan en número de página
+   * (guías de puntos o espaciado múltiple). El bloque termina en la primera
+   * línea estructural sin número de página o ante el primer cuerpo de texto.
+   * Devuelve los offsets de inicio a descartar como fronteras.
+   */
+  private tocNodeStarts(text: string, nodes: OutlineNode[], isPdf: boolean): Set<number> {
+    const skipped = new Set<number>();
+    if (!isPdf) return skipped;
+
+    let block: OutlineNode[] = [];
+    for (const n of nodes) {
+      if (block.length > 0 && this.hasBodyBetween(text, block[block.length - 1], n)) break;
+      if (this.lineEndsWithPageNumber(text, n.start)) {
+        block.push(n);
+      } else if (block.length >= 4) {
+        break;
+      } else {
+        block = [];
+      }
+    }
+
+    if (block.length >= 4) {
+      for (const n of block) skipped.add(n.start);
+    }
+    return skipped;
+  }
+
+  /** ¿La línea que inicia en `offset` termina en un número de página (tras guías de puntos o espaciado múltiple)? */
+  private lineEndsWithPageNumber(text: string, offset: number): boolean {
+    const end = this.lineEndOffset(text, offset);
+    const line = text.slice(offset, end);
+    return /(?:\.{2,}\s*|\s{2,})\d{1,3}\s*\.?\s*$/.test(line);
   }
 
   /** Parte el texto en segmentos, cada uno desde una frontera hasta la siguiente. */

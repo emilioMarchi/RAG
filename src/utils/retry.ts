@@ -3,15 +3,19 @@ export async function withRetry<T>(
   options: {
     maxRetries?: number;
     baseDelay?: number;
-    /** Delay mínimo (ms) cuando el error es rate-limit (429). Default: 30000 */
+    /** Delay mínimo (ms) cuando el error es rate-limit (429). Default: 10000 */
     rateLimitDelay?: number;
     label?: string;
   } = {}
 ): Promise<T> {
+  const envRateLimit = Number(process.env.RAG_RATE_LIMIT_RETRY_MS);
+  const defaultRateLimitDelay =
+    Number.isFinite(envRateLimit) && envRateLimit > 0 ? envRateLimit : 10_000;
+
   const {
     maxRetries = 3,
     baseDelay = 1000,
-    rateLimitDelay = 30_000,
+    rateLimitDelay = defaultRateLimitDelay,
     label = 'operation',
   } = options;
 

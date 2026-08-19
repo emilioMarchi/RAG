@@ -39,6 +39,12 @@ export interface ChunkingStrategyConfig {
    * Si se omite → `parent/childMaxChars` fijos (comportamiento actual, cero regresión).
    */
   sizeFor?: (segment: { text: string }) => number;
+  /**
+   * Parent chunks estructura-aware por ARTICULO (1 parent = 1 artículo, con sus
+   * encabezados de sección adheridos). Si el texto no tiene ARTICULO/ANEXO se
+   * cae al particionado por tamaño habitual (cero regresión).
+   */
+  articleAware?: boolean;
 }
 
 /**
@@ -74,6 +80,11 @@ export class GenericChunkingStrategy implements ChunkingStrategy {
   }
 }
 
+/** Línea estructural del documento legal: su salto de línea debe conservarse
+ *  para que el detector de fronteras (por líneas) y el outline la vean. */
+const STRUCTURAL_LINE_RE =
+  /^(\d{1,4}[.)]|[a-z]{1,2}\)|[ivxlcdm]{2,8}[.)]|art(?:[ií]culo|iculo)?\.?\s*\d+|#{1,6}\s+|[-*•·]\s+|(?:T[IÍ]TULO|CAP[IÍ]TULO|SECCI[OÓ]N|ANEXO|PARTE|LEY|DECRETO|DISPOSICIONES?)\b|[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ]{3,48}:)/i;
+
 /**
  * Estrategia especializada en normativas/leyes/PDFs legales.
  * - Primero limpia el texto reconstruyendo palabras cortadas por saltos de página.
@@ -85,6 +96,10 @@ export class LegalNormChunkingStrategy implements ChunkingStrategy {
     parentMaxChars: 3500, // ~1000 tokens para la ventana de contexto del LLM
     childMaxChars: 1200,  // ~300-350 tokens para embeddings semánticos densos
     childMinChars: 150,
+    // Parent chunks estructura-aware: un parent por ARTICULO (con sus títulos
+    // de sección adheridos). Sub-división interna solo si el artículo excede
+    // parentMaxChars.
+    articleAware: true,
     clean: (t) => this.cleanWithMap(t).text,
   };
 
@@ -126,15 +141,25 @@ export class LegalNormChunkingStrategy implements ChunkingStrategy {
         const nextNL = i + 1 < L && text[i + 1] === '\n';
         if (prevNL || nextNL) { out.push('\n'); src.push(i); i += 1; continue; } // párrafo
 
+        // Conservar el salto de línea si la línea ANTERIOR es estructural ("ANEXO I"
+        // seguido de "Planilla...", "TITULO II - ..." seguido de su subtítulo): sin
+        // esto el texto siguiente se pega a la línea del encabezado ("ANEXO IPlanilla")
+        // y el outline/el regex deja de reconocer el nodo.
+        const prevLineStart = text.lastIndexOf('\n', i - 1) + 1;
+        if (STRUCTURAL_LINE_RE.test(text.slice(prevLineStart, i).trim())) {
+          out.push('\n'); src.push(i); i += 1; continue;
+        }
+
         // Conservar el salto de línea si la línea siguiente es ESTRUCTURAL (ARTICULO,
-        // numeración, encabezado, ítem de lista). Sin esto, colapsar el \n en espacio
-        // haría que el detector de fronteras (que es POR LÍNEA) ya no viera el inicio
-        // de cada artículo y absorbiera el título dentro del chunk anterior.
+        // numeración, inciso a), encabezado, ítem de lista). Sin esto, colapsar el \n
+        // en espacio haría que el detector de fronteras (que es POR LÍNEA) ya no viera
+        // el inicio de cada artículo/inciso y absorbiera el título dentro del chunk
+        // anterior.
         let k = i + 1;
         while (k < L && (text[k] === ' ' || text[k] === '\t')) k++;
         const lineEnd = text.indexOf('\n', k);
         const line = text.slice(k, lineEnd < 0 ? Math.min(L, k + 60) : lineEnd).trim();
-        if (/^(\d{1,4}[.)]|[ivxlcdm]{2,8}[.)]|art(?:ículo|iculo)?\.?\s*\d+|#{1,6}\s+|[-*•·]\s+|[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ]{3,48}:)/i.test(line)) {
+        if (STRUCTURAL_LINE_RE.test(line)) {
           out.push('\n'); src.push(i); i += 1; continue;
         }
 
@@ -263,11 +288,19 @@ export function splitWithStrategy(
   const overlapChars = opts.overlapChars ?? 0;
   // No pasamos `pages` al split jerárquico: la ubicación real la resolvemos abajo
   // contra el texto original para no desalinear bbox al usar texto ya limpio.
+  const parentMaxChars = opts.parentMaxChars ?? strategy.config.parentMaxChars;
+  // Parent chunks por ARTICULO (estrategia legal): 1 parent = 1 artículo con sus
+  // encabezados adheridos. `undefined` cuando no hay articulación → particionado
+  // por tamaño habitual (cero regresión).
+  const parentSlices = strategy.config.articleAware
+    ? chunker.splitByArticles(prepared.text, { maxChars: parentMaxChars, mimeType: opts.mimeType })
+    : undefined;
   const result = chunker.splitHierarchical(prepared.text, opts.mimeType ?? '', {
-    parentMaxChars: opts.parentMaxChars ?? strategy.config.parentMaxChars,
+    parentMaxChars,
     childMaxChars: opts.childMaxChars ?? strategy.config.childMaxChars,
     childMinChars: opts.childMinChars ?? strategy.config.childMinChars,
     sizeFor: opts.sizeFor ?? strategy.config.sizeFor,
+    parentSlices,
   });
 
   // Fase 6 — Contexto normativo: para la estrategia legal, reconstruir el outline
@@ -289,7 +322,7 @@ export function splitWithStrategy(
       ? prepared.text.slice(Math.max(0, loc.startChar - overlapChars), loc.endChar)
       : ch.text;
 
-    const located = chunker.locateOnOriginal(text, opts.pages, loc.startChar, loc.endChar, prepared.index);
+    const located = chunker.locateOnOriginal(text, opts.pages, loc.startChar, loc.endChar, prepared.index, ch.text);
     // Core == rango publicado (sin overlap). Lo anotamos por compatibilidad con F5.
     if (located.startChar != null && located.endChar != null) {
       located.coreStartChar = located.startChar;

@@ -37,7 +37,11 @@ const rag = new HierarchicalRAGModule(embedder, llm);
 const iterativeRag = new IterativeRAGEngine(embedder, llm, {
   maxIterations: env.RAG_MAX_ITERATIONS,
   enableReranking: env.RAG_ENABLE_RERANKING,
-  enableCRAG: env.RAG_ENABLE_CRAG,
+  rerankStrategy: env.RAG_RERANK_STRATEGY,
+  cragMaxPasses: env.RAG_CRAG_MAX_PASSES,
+  enableContextExpansion: env.RAG_ENABLE_CONTEXT_EXPANSION,
+  enableDecompose: env.RAG_ENABLE_DECOMPOSE,
+  timeoutMs: env.RAG_TIMEOUT_MS,
 });
 const agentService = new AgentService(llm, iterativeRag, {
   maxTurns: env.AGENT_MAX_TURNS,

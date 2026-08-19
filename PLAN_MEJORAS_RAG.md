@@ -1,100 +1,72 @@
-# Plan de Integración: Mejoras Avanzadas para RAG Studio
+Para un sistema RAG multicapa aplicado a jurisprudencia y documentos legales en español, la elección del modelo de embeddings (o de reranking) es crítica: el lenguaje jurídico es extenso, denso, lleno de jerga formal, referencias cruzadas y matices sutiles donde cambiar una palabra altera todo el sentido.
 
-Este documento detalla la planificación técnica paso a paso para integrar capacidades de **Graph-RAG real**, **Filtros por Metadatos**, **Citas Interactivas (Citations)**, y **RAG Correctivo (CRAG)** en el sistema actual.
+Dado que buscas mantener el control total del pipeline y ejecutar módulos locales o customizables, la arquitectura óptima para cada capa o etapa del RAG se compone de la siguiente manera:
 
----
+Arquitectura de Embeddings por Capa / Etapa
+En un RAG multicapa o jerárquico para jurisprudencia, se suelen dividir los documentos en diferentes niveles de abstracción (por ejemplo: Capa 1: Resúmenes/Sumarios/Fallas; Capa 2: Fragmentos densos del cuerpo de la sentencia; Capa 3: Búsqueda Léxica/Reranking).
 
-## 🗺️ Mapa de Ruta (Roadmap) de Implementación
+1. Capa de Resúmenes / Sumarios / Preguntas Frecuentes (Indexación de Alto Nivel)
+Objetivo: Filtrar o enrutar rápido la doctrina o la rama del derecho (ej. laboral, civil, penal) antes de ir a los textos largos.
 
-```mermaid
-graph TD
-    A[Fase 1: Graph-RAG E-R] --> B[Fase 2: Citations & Filtros UI]
-    B --> C[Fase 3: Corrective RAG - CRAG]
-    C --> D[Fase 4: Evaluación & Logs]
-```
+Modelo recomendado: hiems/BERTa-MiniLM-L6-v2-es o paraphrase-multilingual-MiniLM-L12-v2
 
----
+Por qué: Son extremadamente rápidos y ligeros (dimensiones de 384). Funcionan perfecto para fragmentos cortos (hasta 256–512 tokens) y te permiten hacer una primera filtración semántica muy veloz en CPU sin latencia alta.
 
-## 🛠️ Detalle de Fases y Tareas
+2. Capa Principal de Recuperación Semántica (Cuerpo de Sentencias / Artículos)
+Objetivo: Capturar el significado profundo de fragmentos complejos, considerandos, antecedentes y fundamentos jurídicos.
 
-### Fase 1: Graph-RAG (Extracción de Entidades y Relaciones)
-* **Objetivo**: Pasar de similitud puramente vectorial a un grafo de conocimiento estructurado.
+Modelos recomendados:
 
-#### 1. SQL Schema Update
-Crear la tabla para almacenar el grafo de entidades y relaciones.
-```sql
-CREATE TABLE document_entities (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  document_id UUID REFERENCES documents(id) ON DELETE CASCADE,
-  paragraph_id UUID REFERENCES document_paragraphs(id) ON DELETE CASCADE,
-  entity_name TEXT NOT NULL,
-  entity_type VARCHAR(100) NOT NULL, -- ej: Persona, Lugar, Organización, Concepto
-  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-);
+BAAI/bge-m3 (La recomendación estrella open-source)
 
-CREATE TABLE entity_relations (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  source_entity_id UUID REFERENCES document_entities(id) ON DELETE CASCADE,
-  target_entity_id UUID REFERENCES document_entities(id) ON DELETE CASCADE,
-  relation_type TEXT NOT NULL, -- ej: "desarrolla", "pertenece a", "es parte de"
-  context_paragraph_id UUID REFERENCES document_paragraphs(id) ON DELETE CASCADE
-);
-```
+Dimensiones: 1024.
 
-#### 2. Ingesta Asistida por LLM (`src/services/entityExtractionService.ts`)
-Durante el pipeline de ingesta (`IngestionPipeline`), llamar a un prompt de extracción para identificar entidades y cómo se relacionan entre sí a partir del fragmento contextualizado.
+Ventajas clave para RAG legal:
 
----
+Contexto extenso (8192 tokens): Te permite indexar párrafos o considerandos largos sin truncar arbitrariamente los argumentos jurídicos.
 
-### Fase 2: Interactividad en la UI (Citations & Filtros)
-* **Objetivo**: Conectar el Chat RAG con el Grafo de Relaciones y el Explorador Jerárquico.
+Búsqueda Híbrida Nativa: bge-m3 genera simultáneamente dense embeddings (similitud semántica), sparse embeddings (tipo BM25/keywords) y vectores multivector. Esto es ideal para jurisprudencia, donde a veces se busca por concepto (semántico) y a veces por una ley, artículo o número de causa exacto (léxico).
 
-#### 1. Formateo de Citaciones en la Respuesta
-Modificar `src/services/openCodeService.ts` en `generateRAGAnswer` para forzar al LLM a devolver citas referenciando IDs de fragmentos específicos en formato markdown (ej. `[1](fragment-uuid)`).
+intfloat/multilingual-e5-large o multilingual-e5-base
 
-#### 2. Eventos interactivos en el frontend (`public/app.js`)
-* Analizar los enlaces de fragmentos `[1](fragment-uuid)` en el HTML generado del chat.
-* Agregarles un listener que al hacer click:
-  1. Cambie de pestaña a **Grafo de Relaciones** o **Explorador**.
-  2. Ejecute `window.focusNodeInGraph('frag-uuid')` para centrar y resaltar visualmente la fuente del dato.
+Ventajas: Excelente rendimiento para recuperación de información en español. Requiere usar prefijos en las consultas (query: ... y passage: ...), lo que optimiza la asimetría entre una pregunta corta del usuario y un fragmento de sentencia largo.
 
-#### 3. Filtros en la Barra Lateral
-* Permitir filtrar los documentos por extensión, fecha o categoría desde el panel izquierdo.
-* Propagar estos filtros en las peticiones a `/api/query` para reducir el espacio de búsqueda semántica.
+3. Capa de Reranking / Reordenamiento (Paso Crítico en Jurisprudencia)
+En el ámbito legal, un buscador vectorial por sí solo suele traer textos que "suenan parecido" pero que dicen lo opuesto (ej. declarar procedente vs improcedente un recurso). Por eso, pasar los top-N resultados (ej. top 20) por un Cross-Encoder / Reranker es casi obligatorio.
 
----
+Objetivo: Reevaluar la consulta junto con cada fragmento recuperado para reordenar por relevancia real.
 
-### Fase 3: RAG Correctivo (CRAG) & Agentic Loop
-* **Objetivo**: Evaluar la relevancia del contexto antes de responder y auto-corregir.
+Modelos recomendados:
 
-#### 1. Evaluador de Relevancia (`src/services/relevanceEvaluator.ts`)
-Antes de enviar el contexto al LLM generador:
-1. Pasar los fragmentos recuperados a un LLM evaluador con la pregunta original.
-2. Determinar si la información provista es: `RELEVANTE`, `PARCIAL`, o `IRRELEVANTE`.
+BAAI/bge-reranker-large o BAAI/bge-reranker-v2-m3
 
-#### 2. Rutas alternativas en `src/services/iterativeRAGEngine.ts`
-* **Si es RELEVANTE**: Proceder con la generación estándar.
-* **Si es PARCIAL/IRRELEVANTE**:
-  * Utilizar el LLM para reformular o ampliar la consulta original.
-  * Realizar una segunda búsqueda con la nueva consulta (búsqueda iterativa expandida).
-  * Si persiste la duda, indicar explícitamente qué información falta en lugar de alucinar.
+unicamp-dl/mt5-base-mmarco-spanish-cross-encoder
 
----
+Cómo actúa: A diferencia del embedding (que compara vectores separados), el Reranker procesa la pregunta y el texto juntos en el modelo de atención, detectando si la jurisprudencia realmente responde al caso planteado.
 
-### Fase 4: Evaluación y Calidad (Ragas Backend)
-* **Objetivo**: Medir la fidelidad de las respuestas automáticamente.
+Estrategia de Implementación Recomendada para RAG Legal
+Si estás armando el pipeline customizado, la combinación ideal en flujo de trabajo es:
 
-#### 1. Base de Datos de Métricas
-```sql
-CREATE TABLE query_evaluations (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  query_text TEXT NOT NULL,
-  answer_text TEXT NOT NULL,
-  faithfulness_score NUMERIC(3, 2), -- Fidelidad al contexto (0.00 a 1.00)
-  answer_relevance_score NUMERIC(3, 2), -- Relevancia de la respuesta al usuario (0.00 a 1.00)
-  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-);
-```
+[Consulta del Usuario]
+       │
+       ▼
+┌─────────────────────────────────────────────────────────────┐
+│ 1. Búsqueda Híbrida (Dense + Sparse)                        │
+│    - Denso: BAAI/bge-m3 (Semantic search)                   │
+│    - Léxico: BM25 / Qdrant Sparse / Elasticsearch           │
+└──────────────────────────────┬──────────────────────────────┘
+                               │ (Trae los Top-30 a Top-50)
+                               ▼
+┌─────────────────────────────────────────────────────────────┐
+│ 2. Capa de Reordenamiento (Reranking)                       │
+│    - BAAI/bge-reranker-v2-m3                                │
+└──────────────────────────────┬──────────────────────────────┘
+                               │ (Filtra a los mejores Top-5)
+                               ▼
+┌─────────────────────────────────────────────────────────────┐
+│ 3. Generación (LLM) con Contexto Legal Ajustado             │
+└─────────────────────────────────────────────────────────────┘
+Consejos prácticos para Jurisprudencia:
+Atención al Chunkeado (Chunking): No cortes sentencias por número fijo de caracteres. Divide por estructura formal (ej. Vistos, Considerando, Resuelvo, o por párrafos/artículos).
 
-#### 2. Pipeline de Evaluación
-Al finalizar cada consulta RAG, correr en segundo plano un proceso ligero donde el LLM califique la respuesta generada con respecto al contexto recuperado para generar estadísticas de calidad del sistema.
+Metadata enriquecida: Almacena junto con los vectores campos de metadatos como: Tribunal, Fecha, Fuero, Tipo de Recurso y Resultado (Hizo lugar / Rechazó). Esto te permite aplicar filtros duros en la base vectorial antes de calcular la distancia semántica.

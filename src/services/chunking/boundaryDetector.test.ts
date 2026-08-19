@@ -44,6 +44,30 @@ describe('detectBoundaries', () => {
     expect(lists[0].label?.includes('Primer ítem')).toBe(true)
   })
 
+  it('detecta incisos de artículo en minúscula (a), b., aa)) como kind item', () => {
+    const text = [
+      'ARTICULO 1. - Cuerpo del artículo.',
+      'a) inciso primero con contenido suficiente para el ejemplo',
+      'b) inciso segundo que también debe detectarse',
+      'aa) último inciso compuesto',
+      '2) numeral doble',
+    ].join('\n')
+    const bounds = detectBoundaries(text, { kinds: ['item', 'numbered'] })
+    const items = bounds.filter(b => b.kind === 'item')
+    expect(items.length).toBe(3)
+    expect(items[0].label?.startsWith('a)')).toBe(true)
+    expect(items[1].label?.startsWith('b)')).toBe(true)
+    expect(items[2].label?.startsWith('aa)')).toBe(true)
+    // La enumeración numérica sigue siendo numbered (no item)
+    expect(bounds.some(b => b.kind === 'numbered' && b.label?.startsWith('2)'))).toBe(true)
+  })
+
+  it('una oración común en minúscula no se confunde con un inciso', () => {
+    const text = 'las disposiciones de la presente ley serán de orden público.'
+    const bounds = detectBoundaries(text, { kinds: ['item'] })
+    expect(bounds.filter(b => b.kind === 'item')).toHaveLength(0)
+  })
+
   it('detecta saltos de página conservados como form-feed', () => {
     const text = 'Contenido página 1.\fContenido página 2.\fContenido página 3.'
     const bounds = detectBoundaries(text, { kinds: ['page'] })

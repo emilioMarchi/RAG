@@ -30,7 +30,7 @@ export class CRAGEvaluator {
     }
 
     const contextSummary = sources
-      .map((s, i) => `[${i + 1}] (${s.doc_title}, frag.${s.paragraph_index}): ${s.raw_content.substring(0, 300)}`)
+      .map((s, i) => `[${i + 1}] (${s.doc_title}, frag.${s.paragraph_index}):\n${s.raw_content}`)
       .join('\n\n');
 
     const prompt = `

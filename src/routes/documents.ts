@@ -159,6 +159,71 @@ export function createDocumentRouter(
   });
 
   /**
+   * GET /api/documents/:id/chunks
+   * Devuelve parent chunks + child chunks con su jerarquía completa.
+   * Útil para debuggear qué se está vectorizando y enviando al LLM.
+   */
+  router.get('/documents/:id/chunks', async (req: Request, res: Response) => {
+    try {
+      const { id } = req.params;
+
+      const [parentsRes, childrenRes] = await Promise.all([
+        query<{
+          id: string;
+          parent_index: number;
+          content: string;
+          start_child_index: number;
+          end_child_index: number;
+        }>(
+          `SELECT id, parent_index, content, start_child_index, end_child_index
+           FROM document_parent_chunks
+           WHERE document_id = $1
+           ORDER BY parent_index ASC`,
+          [id]
+        ),
+        query<{
+          id: string;
+          paragraph_index: number;
+          raw_content: string;
+          contextualized_text: string;
+          parent_chunk_id: string;
+          metadata: { location?: Record<string, unknown>; contextPath?: string };
+        }>(
+          `SELECT id, paragraph_index, raw_content, contextualized_text, parent_chunk_id, metadata
+           FROM document_paragraphs
+           WHERE document_id = $1
+           ORDER BY paragraph_index ASC`,
+          [id]
+        ),
+      ]);
+
+      res.json({
+        parentChunks: parentsRes.rows.map(p => ({
+          id: p.id,
+          index: p.parent_index,
+          text: p.content,
+          childRange: [p.start_child_index, p.end_child_index],
+          length: p.content.length,
+        })),
+        childChunks: childrenRes.rows.map(c => ({
+          id: c.id,
+          index: c.paragraph_index,
+          rawContent: c.raw_content,
+          contextualizedText: c.contextualized_text,
+          parentChunkId: c.parent_chunk_id,
+          contextPath: c.metadata?.contextPath ?? null,
+          location: c.metadata?.location ?? null,
+          rawLength: c.raw_content.length,
+          ctxLength: c.contextualized_text.length,
+        })),
+      });
+    } catch (error) {
+      console.error('List chunks error:', error);
+      res.status(500).json({ error: 'Error al obtener chunks' });
+    }
+  });
+
+  /**
    * GET /api/documents/:id/file
    * Devuelve el archivo original del documento (para el visor de contexto).
     */

@@ -87,6 +87,55 @@ describe('splitHierarchical location', () => {
     expect(withPage).toBeDefined()
     expect(withPage!.location!.pageNumber).toBeGreaterThanOrEqual(1)
   })
+
+  it('assigns boxesByPage covering multiple pages for a chunk that crosses a page boundary', () => {
+    const pages = [
+      {
+        pageNumber: 1,
+        text: 'INICIO DE LA LEY.\nParrafo que termina en la pagina uno.',
+        items: [
+          { str: 'INICIO', x: 0.1, y: 0.1, width: 0.2, height: 0.05 },
+          { str: ' DE LA LEY.', x: 0.31, y: 0.1, width: 0.3, height: 0.05 },
+        ],
+        ranges: [
+          { start: 0, end: 6, item: { str: 'INICIO', x: 0.1, y: 0.1, width: 0.2, height: 0.05 } },
+          { start: 6, end: 18, item: { str: ' DE LA LEY.', x: 0.31, y: 0.1, width: 0.3, height: 0.05 } },
+        ],
+      },
+      {
+        pageNumber: 2,
+        text: 'CONTINUACION DEL TEXTO.\nOtro parrafo en la segunda pagina.',
+        items: [
+          { str: 'CONTINUACION', x: 0.2, y: 0.3, width: 0.4, height: 0.06 },
+          { str: ' DEL TEXTO.', x: 0.61, y: 0.3, width: 0.3, height: 0.06 },
+        ],
+        ranges: [
+          { start: 0, end: 12, item: { str: 'CONTINUACION', x: 0.2, y: 0.3, width: 0.4, height: 0.06 } },
+          { start: 12, end: 24, item: { str: ' DEL TEXTO.', x: 0.61, y: 0.3, width: 0.3, height: 0.06 } },
+        ],
+      },
+    ]
+    // Fragmento cuyo texto se reparte entre las dos páginas (no existe completo en ninguna).
+    const needle = 'INICIO DE LA LEY.\nParrafo hipotetico ausente.\nCONTINUACION DEL TEXTO.'
+    const flat = c.buildFlatText(pages as never)
+    const { children } = c.splitHierarchical(flat, 'application/pdf', {
+      childMaxChars: 2000,
+      childMinChars: 1,
+      pages: pages as never,
+    })
+
+    const chunk = children.find(ch => ch.text.includes('INICIO DE LA LEY'))
+    expect(chunk).toBeDefined()
+    expect(chunk!.location!.pageNumber).toBe(1)
+    expect(Array.isArray(chunk!.location!.boxesByPage)).toBe(true)
+    const pagesHit = chunk!.location!.boxesByPage!.map(p => p.pageNumber)
+    expect(pagesHit).toContain(1)
+    expect(pagesHit.length).toBeGreaterThanOrEqual(1)
+    for (const p of chunk!.location!.boxesByPage!) {
+      expect(Array.isArray(p.boxes)).toBe(true)
+      expect(p.boxes.length).toBeGreaterThan(0)
+    }
+  })
 })
 
 describe('sanitizeLayout (Fase 0)', () => {
@@ -173,6 +222,151 @@ describe('splitStructural', () => {
     const slices = c2.splitStructural(text, 100)
     expect(slices.length).toBeGreaterThan(1)
     for (const s of slices) expect(s.text.length).toBeLessThanOrEqual(100)
+  })
+})
+
+describe('splitByArticles', () => {
+  it('genera un parent chunk por ARTICULO sin agrupar artículos cortos', () => {
+    const c2 = new ChunkingService()
+    const text = [
+      'LEY 27.541 - PRESUPUESTO.',
+      'CONSIDERANDO que resulta necesario adecuar el marco fiscal.',
+      'TITULO II - REGIMEN FISCAL.',
+      'ARTICULO 1. - Objeto de la presente.',
+      'ARTICULO 2. - Facultades de la autoridad.',
+      'TITULO III - DISPOSICIONES FINALES.',
+      'ARTICULO 3. - Vigencia.',
+    ].join('\n')
+    const slices = c2.splitByArticles(text, { maxChars: 3500 })!
+    expect(slices).toBeDefined()
+    // preámbulo + 3 artículos
+    expect(slices.length).toBe(4)
+    const artStarts = slices.map(s => s.text.trim())
+    expect(artStarts[0]).toContain('CONSIDERANDO')
+    expect(artStarts[0]).not.toContain('ARTICULO 1')
+    // el TITULO II queda adherido al ARTICULO 1 (nunca al preámbulo ni huérfano)
+    expect(artStarts[1]).toContain('TITULO II')
+    expect(artStarts[1]).toContain('ARTICULO 1.')
+    expect(artStarts[1]).not.toContain('ARTICULO 2.')
+    // cada artículo es un chunk propio
+    expect(artStarts[2]).toContain('ARTICULO 2.')
+    expect(artStarts[2]).not.toContain('ARTICULO 3.')
+    expect(artStarts[3]).toContain('TITULO III')
+    expect(artStarts[3]).toContain('ARTICULO 3.')
+  })
+
+  it('adhiere una cadena de encabezados contiguos al artículo que la sigue', () => {
+    const c2 = new ChunkingService()
+    const text = [
+      'TITULO II - REGIMEN FISCAL.',
+      'CAPITULO III - IMPOSICION.',
+      'ARTICULO 14. - Se establece el regimen de la presente.',
+      'ARTICULO 15. - Facultades del Estado.',
+    ].join('\n')
+    const slices = c2.splitByArticles(text, { maxChars: 3500 })!
+    expect(slices.length).toBe(2)
+    expect(slices[0].text).toContain('TITULO II')
+    expect(slices[0].text).toContain('CAPITULO III')
+    expect(slices[0].text).toContain('ARTICULO 14.')
+    // un encabezado nunca queda colgado al chunk del artículo anterior
+    expect(slices[0].text).not.toContain('ARTICULO 15.')
+    expect(slices[1].text).toContain('ARTICULO 15.')
+  })
+
+  it('el cuerpo entre encabezado y artículo (introducción de sección) queda en el chunk del título', () => {
+    const c2 = new ChunkingService()
+    const text = (
+      'ARTICULO 4. - Regla anterior.\n\n' +
+      'TITULO V - DE LA PRESCRIPCION.\n' +
+      'La prescripción se computa desde la fecha de la infracción.\n\n' +
+      'ARTICULO 20. - Plazo de prescripción.'
+    )
+    const slices = c2.splitByArticles(text, { maxChars: 3500 })!
+    expect(slices.length).toBe(2)
+    expect(slices[0].text).toContain('ARTICULO 4.')
+    expect(slices[0].text).not.toContain('TITULO V')
+    expect(slices[1].text).toContain('TITULO V')
+    expect(slices[1].text).toContain('La prescripción se computa')
+    expect(slices[1].text).toContain('ARTICULO 20.')
+  })
+
+  it('el preámbulo es un chunk propio y un ANEXO inicia su propio chunk', () => {
+    const c2 = new ChunkingService()
+    const text = [
+      'DECRETO 124 - REGLAMENTARIO.',
+      'CONSIDERANDO que corresponde reglamentar la ley 27.541.',
+      'ARTICULO 1. - Reglamento.',
+      'ARTICULO 2. - Alcance.',
+      'ANEXO I',
+      'Formulario de declaración jurada.',
+    ].join('\n')
+    const slices = c2.splitByArticles(text, { maxChars: 3500 })!
+    expect(slices.length).toBe(4)
+    expect(slices[0].text).toContain('DECRETO 124')
+    expect(slices[3].text).toContain('ANEXO I')
+    expect(slices[3].text).toContain('Formulario de declaración jurada.')
+    expect(slices[3].text).not.toContain('ARTICULO')
+  })
+
+  it('subdivide un artículo gigante respetando sus fronteras internas', () => {
+    const c2 = new ChunkingService()
+    const incisos = Array.from({ length: 14 }, (_, i) => `${['a', 'b', 'c', 'd', 'e', 'f'][i % 6]}) inciso con contenido extenso del artículo.`)
+    const text = 'ARTICULO 1. - Objeto.\n' + incisos.join('\n')
+    const slices = c2.splitByArticles(text, { maxChars: 300 })!
+    expect(slices.length).toBeGreaterThan(1)
+    for (const s of slices) expect(s.text.length).toBeLessThanOrEqual(300)
+    // el encabezado del artículo queda en el primer trozo
+    expect(slices[0].text).toContain('ARTICULO 1. - Objeto.')
+    // sin pérdida ni reordenamiento de contenido (los separadores de línea de los
+    // cortes son espacio en blanco normalizado)
+    const norm = (t: string) => t.replace(/\s+/g, ' ')
+    expect(norm(slices.map(s => s.text).join(' '))).toBe(norm(text))
+  })
+
+  it('devuelve undefined cuando no hay articulación (cero regresión)', () => {
+    const c2 = new ChunkingService()
+    const slices = c2.splitByArticles('Simplemente un texto sin artículos, con párrafos comunes.')
+    expect(slices).toBeUndefined()
+  })
+
+  it('descarta el índice (TOC) de un PDF al computar fronteras', () => {
+    const c2 = new ChunkingService()
+    const text = [
+      'LEY 27.541 - PRESUPUESTO.',
+      'TITULO II .......... 5',
+      'CAPITULO III ....... 6',
+      'ARTICULO 14 ........ 7',
+      'ARTICULO 15 ........ 8',
+      'TITULO II - REGIMEN FISCAL.',
+      'ARTICULO 14. - Se establece el regimen.',
+      'ARTICULO 15. - Facultades del Estado.',
+    ].join('\n')
+    const slices = c2.splitByArticles(text, { maxChars: 3500, mimeType: 'application/pdf' })!
+    // las líneas del índice no generan fronteras: solo preámbulo + 2 artículos
+    expect(slices.length).toBe(3)
+    expect(slices[0].text).toContain('LEY 27.541')
+    // el TITULO real se adhiere al ARTICULO 14 (no al preámbulo)
+    expect(slices[1].text.startsWith('TITULO II - REGIMEN FISCAL.')).toBe(true)
+    expect(slices[1].text).toContain('ARTICULO 14.')
+    expect(slices[2].text).toContain('ARTICULO 15.')
+    // sin modo PDF, las líneas del índice SÍ producen fronteras (comportamiento previo)
+    const noPdf = c2.splitByArticles(text, { maxChars: 3500 })!
+    expect(noPdf.length).toBeGreaterThan(3)
+  })
+
+  it('respeta el fallback por tamaño cuando se pasan parentSlices a splitHierarchical', () => {
+    const c2 = new ChunkingService()
+    const text = 'ARTICULO 1. - Uno.\nARTICULO 2. - Dos.'
+    const parents = c2.splitByArticles(text, { maxChars: 3500 })!
+    const { parents: p, children } = c2.splitHierarchical(text, 'text/plain', {
+      parentSlices: parents,
+      childMaxChars: 1000,
+      childMinChars: 1,
+    })
+    expect(p.length).toBe(2)
+    expect(p[0].text).toContain('ARTICULO 1.')
+    expect(p[1].text).toContain('ARTICULO 2.')
+    expect(children.length).toBeGreaterThanOrEqual(2)
   })
 })
 

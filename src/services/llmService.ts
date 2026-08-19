@@ -6,6 +6,9 @@ import { withRetry } from '../utils/retry.js';
 const client = new OpenAI({
   baseURL: env.LLM_API_URL,
   apiKey: env.LLM_API_KEY,
+  // Timeout por llamada HTTP al proveedor para evitar esperas indefinidas.
+  timeout: 60_000,
+  maxRetries: 0, // El retry se maneja en withRetry/complete (fallback de modelos)
 });
 
 export class LLMService {
@@ -252,6 +255,13 @@ ${contextText}
   }
 
   async decomposeQuery(userQuery: string): Promise<string[]> {
+    // Guard heurístico: si la query no presenta indicios de múltiples intenciones,
+    // se evita la llamada LLM (cara y lenta) y se usa la query tal cual.
+    if (!this.mayNeedDecompose(userQuery)) {
+      console.log(`[DECOMPOSE SKIP] Query simple, sin LLM: "${userQuery}"`);
+      return [userQuery];
+    }
+
     return withRetry(
       async () => {
         const prompt = `
@@ -306,6 +316,17 @@ CONSULTA ORIGINAL: "${userQuery}"
       },
       { maxRetries: 3, baseDelay: 2000, label: 'decompose-query' }
     );
+  }
+
+  /**
+   * Determina si una query probablemente contiene múltiples intenciones y merece
+   * descomposición vía LLM. Detecta conectores ('y', 'además', 'también', ',', ';')
+   * o múltiples signos de pregunta. Si no, es una query atómica.
+   */
+  private mayNeedDecompose(query: string): boolean {
+    if (!query) return false;
+    const multiIntent = /\s(y|e|ni)\s|además|también|así como|,\s*|;\s*|\?\s*\?/i;
+    return multiIntent.test(query);
   }
 
   /**

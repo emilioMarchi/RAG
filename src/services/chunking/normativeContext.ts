@@ -16,6 +16,7 @@ export type NormativeLevel =
   | 'titulo'
   | 'capitulo'
   | 'seccion'
+  | 'anexo'
   | 'articulo'
   | 'inciso';
 
@@ -34,6 +35,7 @@ const LEVEL_RANK: Record<NormativeLevel, number> = {
   titulo: 3,
   capitulo: 4,
   seccion: 5,
+  anexo: 6,
   articulo: 6,
   inciso: 7,
 };
@@ -44,6 +46,8 @@ const LEVEL_PARSERS: Array<{ level: NormativeLevel; re: RegExp }> = [
   { level: 'titulo', re: /^T[IÍ]TULO\s+([IVXLCDM]+|\d+)/i },
   { level: 'capitulo', re: /^(?:CAP[IÍ]TULO|CAP\.)\s+([IVXLCDM]+|\d+)/i },
   { level: 'seccion', re: /^SECCI[OÓ]N\s+([IVXLCDM]+|\d+)/i },
+  { level: 'seccion', re: /^DISPOSICIONES?(?:\s+(?:GENERALES|TRANSITORIAS|COMPLEMENTARIAS|ADICIONALES|FINALES|MODIFICATORIAS))?/i },
+  { level: 'anexo', re: /^ANEXO\s+([IVXLCDM]+|\d+|[A-Za-zÀ-ÿ]{1,3})(?:[\s.:-]|$)/i },
   { level: 'articulo', re: /^ART(?:[IÍ]CULO|ICULO)?\.?\s+(\d+)/i },
   { level: 'inciso', re: /^(?:Inciso|NUMERAL|INCISO)\s+([a-zA-Z0-9]+)/i },
 ];

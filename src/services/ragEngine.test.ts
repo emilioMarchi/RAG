@@ -28,9 +28,12 @@ describe('HierarchicalRAGModule', () => {
     })
     query.mockResolvedValueOnce({
       rows: [
-        { raw_content: 'r1', contextualized_text: 'ctx1', doc_title: 'Doc 1', r2_key: 'k1', r2_url: 'url1' }
+        { id: 'p1', document_id: 'doc-1', paragraph_index: 0, parent_chunk_id: null,
+          raw_content: 'r1', contextualized_text: 'ctx1', doc_title: 'Doc 1', r2_key: 'k1', r2_url: 'url1' }
       ]
     })
+    // Default: bm25 y resto de consultas (enrich parents) devuelven vacío.
+    query.mockResolvedValue({ rows: [] })
     const res = await rag.query('test query', 5, 3)
     expect(res.answer).toBe('Answer from RAG')
     expect(res.sources).toHaveLength(1)

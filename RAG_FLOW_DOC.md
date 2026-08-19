@@ -164,12 +164,19 @@ Detalles que agravan cada LLM call (`llmService.complete`, `src/services/llmServ
 | ENV | Default | Efecto |
 |---|---|---|
 | `RAG_MAX_ITERATIONS` | `4` | Cota el bucle de expansión (B3) |
-| `RAG_ENABLE_RERANKING` | `true` | Si `false`, elimina las LLM calls #3 y #6 (re-ranking) → **-2 LLM calls** |
-| `RAG_ENABLE_CRAG` | `true` | Si `false`, elimina LLM #5, #6 y los embeds 3 y 4 (re-búsqueda) → **elimina el camino más costoso** |
+| `RAG_RERANK_STRATEGY` | `hybrid` | `llm` vuelve al cross-encoder (más preciso, +LLM calls #3/#6) |
+| `RAG_ENABLE_RERANKING` | `true` | Si `false`, elimina todo re-ranking (híbrido o LLM) |
+| `RAG_CRAG_MAX_PASSES` | `0` | Pases de re-búsqueda CRAG (0 = off → elimina LLM #5/#6 + embeds) |
+| `RAG_ENABLE_CONTEXT_EXPANSION` | `false` | `true` = evalúa y expande contexto con LLM (añade una llamada LLM que puede colgarse con free) |
+| `RAG_ENABLE_DECOMPOSE` | `true` | `false` = nunca descomponer (quita LLM #2 en queries multi-intención) |
+| `RAG_TIMEOUT_MS` | `45000` | Presupuesto global de latencia (0 = ilimitado) |
+| `RAG_RATE_LIMIT_RETRY_MS` | `10000` | Espera por reintento ante 429 (bajo = menos colgues con free) |
 | `LLM_MODEL` / `LLM_BACKUP_MODEL` | free llama | Cambiar a un modelo de pago con baja latencia |
 | `AGENT_TOP_DOCS` | `5` | Nº documentos candidatos |
 
-Activar `RAG_ENABLE_CRAG=false` y `RAG_ENABLE_RERANKING=false` por sí solas reducen el flujo de 7 LLM calls a ~4 (router, decompose, evaluate, answer) y 4 embeddings a 2.
+Con los defaults actuales (`hybrid` + `CRAG off` + sin expansión) el pipeline queda en
+**2 LLM calls (router + answer) + 1 embed**, con `RAG_RATE_LIMIT_RETRY_MS=10000` para
+evitar esperas ciegas ante rate-limit de modelos free.
 
 ---
 
@@ -187,3 +194,38 @@ Activar `RAG_ENABLE_CRAG=false` y `RAG_ENABLE_RERANKING=false` por sí solas red
 ---
 
 *Fin del documento.*
+
+---
+
+## Apéndice — Optimizaciones implementadas (estado actual)
+
+Las secciones anteriores describen el flujo original. A continuación, el estado
+post-refactor y las ganancias esperadas de latencia.
+
+### Cambios aplicados por archivo
+
+| Archivo | Cambio |
+|---|---|
+| `src/services/rerankingService.ts` | Nueva estrategia `'hybrid'` (determinista, sin LLM) como default. `'llm'` opcional. |
+| `src/services/iterativeRAGEngine.ts` | · Se elimina el filtro de documentos 768d (ya no hay `SELECT ... FROM documents`).<br>· Un solo embedding 1536d por sub-query.<br>· Sub-queries procesadas en paralelo (`mapConcurrent`).<br>· CRAG con presupuesto `cragMaxPasses` (bucle).<br>· `enableDecompose` para saltar descomposición.<br>· Timeout global (`QueryTimeoutError`). |
+| `src/services/hybridSearchService.ts` | `docIds=[]` = buscar en TODOS los párrafos (sin filtro `document_id`). |
+| `src/services/llmService.ts` | · Guard heurístico en `decomposeQuery` (evita el LLM en queries atómicas).<br>· Timeout por llamada (60s) en el cliente OpenAI. |
+| `src/services/cragEvaluator.ts` | Prompt muestra el **contexto completo** (antes 300 chars truncados) → menos falsos `PARTIAL`. |
+| `src/config/env.ts` | Nuevos knobs: `RAG_RERANK_STRATEGY`, `RAG_CRAG_MAX_PASSES`, `RAG_ENABLE_DECOMPOSE`, `RAG_TIMEOUT_MS`. |
+| `src/index.ts` | Conecta los nuevos knobs al motor iterativo. |
+
+### Costos por consulta (antes → después, con defaults)
+
+| Recurso | Antes | Después (default `hybrid`/`CRAG off`/sin expansión) |
+|---|---|---|
+| Llamadas LLM en serie | 7 | **2** (router + answer) |
+| Embeddings Gemini | 4 | **1** (1536d) por sub-query; sub-queries en paralelo |
+| Re-ranking vía LLM | 2× | **0** |
+| SQL Postgres | ~10–14 | ~4–6 |
+| Riesgo de espera >1 min | alto | controlado por `RAG_TIMEOUT_MS` + `RAG_RATE_LIMIT_RETRY_MS` |
+
+Para máxima precisión (a costa de tiempo): `RAG_RERANK_STRATEGY=llm`,
+`RAG_CRAG_MAX_PASSES=1` y `RAG_ENABLE_CONTEXT_EXPANSION=true`, idealmente con un
+modelo de pago de baja latencia.
+
+*Fin del apéndice.*

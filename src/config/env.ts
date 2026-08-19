@@ -15,7 +15,9 @@ function optional(key: string): string | undefined {
 }
 
 export const env = {
-  GEMINI_API_KEY: required('GEMINI_API_KEY'),
+  // Gemini (SOLO EMBEDDINGS y solo si EMBEDDING_PROVIDER=gemini).
+  // Con EMBEDDING_PROVIDER=local el sistema no requiere API key de Gemini.
+  GEMINI_API_KEY: process.env.GEMINI_API_KEY || '',
   LLM_API_URL: process.env.LLM_API_URL || 'https://openrouter.ai/api/v1',
   LLM_API_KEY: required('LLM_API_KEY'),
   LLM_MODEL: process.env.LLM_MODEL || 'meta-llama/llama-3.3-70b-instruct:free',
@@ -35,8 +37,8 @@ export const env = {
 
   // RAG iterativo (motor compartido por /api/query/iterative y el agente)
   RAG_MAX_ITERATIONS: parseInt(process.env.RAG_MAX_ITERATIONS || '4', 10),
-  // Estrategia de re-ranking: 'hybrid' (determinista, sin LLM, default) | 'llm' (cross-encoder).
-  RAG_RERANK_STRATEGY: (process.env.RAG_RERANK_STRATEGY || 'hybrid') as 'hybrid' | 'llm',
+  // Estrategia de re-ranking: 'hybrid' (determinista) | 'llm' (cross-encoder) | 'local' (ONNX CPU).
+  RAG_RERANK_STRATEGY: (process.env.RAG_RERANK_STRATEGY || 'hybrid') as 'hybrid' | 'llm' | 'local',
   RAG_ENABLE_RERANKING: (process.env.RAG_ENABLE_RERANKING ?? 'true') === 'true',
   // Corrective RAG: nº máximo de pases de re-búsqueda (0 = desactivado). Default 0.
   RAG_CRAG_MAX_PASSES: parseInt(process.env.RAG_CRAG_MAX_PASSES || '0', 10),
@@ -63,6 +65,20 @@ export const env = {
   // Ingesta de documentos
   // Reducir si el LLM usado es de plan free (OpenRouter free tier limita RPM muy bajo)
   INGESTION_CONCURRENCY: parseInt(process.env.INGESTION_CONCURRENCY || '2', 10),
+
+  // ============================================
+  //  Modelos LOCALES (transformers.js / ONNX)
+  //  Reemplazan a Gemini para embeddings y al LLM para re-ranking.
+  //  Corren en CPU sin llamadas de red después de la primera descarga.
+  // ============================================
+  // Proveedor de embeddings: 'gemini' (API) | 'local' (ONNX en CPU).
+  EMBEDDING_PROVIDER: (process.env.EMBEDDING_PROVIDER || 'gemini') as 'gemini' | 'local',
+  // Modelo local de embeddings (384d, multilingüe). Cambiar solo si se prueba otro.
+  EMBEDDING_MODEL: process.env.EMBEDDING_MODEL || 'Xenova/paraphrase-multilingual-MiniLM-L12-v2',
+  // Dimensión del modelo local. Debe coincidir con la columna vector() de la DB.
+  EMBEDDING_DIMENSIONS: parseInt(process.env.EMBEDDING_DIMENSIONS || '384', 10),
+  // Cross-encoder local para RAG_RERANK_STRATEGY=local (multilingüe, incluye español).
+  RERANKER_MODEL: process.env.RERANKER_MODEL || 'SugoLabs/mmarco-mMiniLMv2-L12-H384-v1',
   // Graph RAG: extracción de entidades/relaciones con el LLM.
   // Desactivado por defecto: el grafo aún no tiene consumidores reales (solo se escribe).
   // Reactivar cuando se implemente un endpoint/vista que lo lea.

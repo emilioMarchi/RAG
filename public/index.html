@@ -127,11 +127,18 @@
             <label for="toggle-relations">Ver relaciones</label>
           </div>
 
+          <!-- Toggle cross-doc (capa inter-documental) -->
+          <div class="graph-checkbox-container" id="crossdoc-container" style="display:none">
+            <input type="checkbox" id="toggle-crossdoc" />
+            <label for="toggle-crossdoc">Relaciones entre documentos</label>
+          </div>
+
           <!-- Controls -->
           <div class="graph-controls">
             <button class="btn-icon" id="btn-clear-query" title="Limpiar búsqueda" style="display:none">✕</button>
             <button class="btn-icon" id="btn-reset-graph" title="Resetear física">⟳</button>
             <button class="btn-icon" id="btn-fit-graph" title="Ajustar vista">⊡</button>
+            <button class="btn-icon btn-ego-exit" id="btn-ego-exit" title="Volver al grafo completo" style="display:none">← Grafo completo</button>
           </div>
         </div>
 
@@ -143,7 +150,10 @@
           <button class="node-detail-close" id="node-detail-close">✕</button>
           <h4 class="node-detail-title" id="node-detail-title"></h4>
           <p class="node-detail-body" id="node-detail-body"></p>
-          <button class="node-detail-view" id="node-detail-view" style="display:none">Ver en documento</button>
+          <div class="node-detail-actions">
+            <button class="node-detail-ego" id="node-detail-ego" style="display:none">🌐 Ver sus relaciones</button>
+            <button class="node-detail-view" id="node-detail-view" style="display:none">Ver en documento</button>
+          </div>
         </div>
 
         <!-- Search bar -->

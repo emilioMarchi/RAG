@@ -5,6 +5,12 @@ const MODEL = 'gemini-embedding-001';
 const BASE_URL = 'https://generativelanguage.googleapis.com/v1';
 
 export class EmbeddingService {
+  constructor() {
+    if (!env.GEMINI_API_KEY) {
+      throw new Error('GEMINI_API_KEY is required when EMBEDDING_PROVIDER=gemini');
+    }
+  }
+
   async generateEmbedding(text: string, dimensions: number = 768): Promise<number[]> {
     return withRetry(
       async () => {

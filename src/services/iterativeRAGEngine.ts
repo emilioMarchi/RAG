@@ -2,6 +2,7 @@ import { EmbeddingService } from './embeddingService.js';
 import { LLMService } from './llmService.js';
 import { HybridSearchService, type ScoredChunk } from './hybridSearchService.js';
 import { RerankingService, type RerankStrategy } from './rerankingService.js';
+import type { LocalReranker } from './localReranker.js';
 import { CRAGEvaluator } from './cragEvaluator.js';
 import { mapConcurrent } from '../utils/concurrency.js';
 import { query } from '../config/db.js';
@@ -32,6 +33,8 @@ export class IterativeRAGEngine {
       bm25Weight?: number;
       enableReranking?: boolean;
       rerankStrategy?: RerankStrategy;
+      /** Reranker cross-encoder local (transformers.js) para strategy 'local' */
+      localReranker?: LocalReranker;
       enableParentChunks?: boolean;
       /** Corrective RAG: nº máximo de pases de re-búsqueda (0 = off). Default: 0 */
       cragMaxPasses?: number;
@@ -44,7 +47,11 @@ export class IterativeRAGEngine {
     } = {}
   ) {
     this.hybridSearch = new HybridSearchService();
-    this.reranker = new RerankingService(llm, options.rerankStrategy ?? 'hybrid');
+    this.reranker = new RerankingService(
+      llm,
+      options.rerankStrategy ?? 'hybrid',
+      options.localReranker ?? null
+    );
     this.crag = new CRAGEvaluator(llm);
   }
 

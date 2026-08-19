@@ -45,7 +45,10 @@ const nodeDetailT  = document.getElementById('node-detail-title');
 const nodeDetailB  = document.getElementById('node-detail-body');
 const nodeDetailCl = document.getElementById('node-detail-close');
 const nodeDetailView = document.getElementById('node-detail-view');
+const nodeDetailEgo = document.getElementById('node-detail-ego');
+const btnEgoExit   = document.getElementById('btn-ego-exit');
 let lastSelNode = null;
+let egoCenterId = null; // Modo fragmento: null = grafo completo, uuid = fragmento centro
 const chatMsgs     = document.getElementById('chat-messages');
 const chatInput    = document.getElementById('chat-input');
 const btnSend      = document.getElementById('btn-send');
@@ -109,6 +112,15 @@ async function fetchDocuments() {
   try {
     documents = await api('/api/documents');
     renderDocList();
+    // La capa inter-documental solo tiene sentido con 2+ documentos
+    const crossdocBox = document.getElementById('crossdoc-container');
+    if (crossdocBox) {
+      crossdocBox.style.display = documents.length > 1 ? '' : 'none';
+      if (documents.length <= 1) {
+        const c = document.getElementById('toggle-crossdoc');
+        if (c) c.checked = false;
+      }
+    }
     await refreshGraph();
   } catch (e) {
     console.error('fetchDocuments', e);
@@ -344,7 +356,9 @@ async function initGraph() {
     const nodeId = params.nodes[0];
     const node = nodesDS.get(nodeId);
     if (!node) return;
-    
+
+    // En modo fragmento el clic sobre un vecino SOLO muestra su detalle;
+    // NO re-centra el grafo. Para re-centrar se usa el botón "🌐 Ver sus relaciones".
     let title = node.label || node.id;
     if (node._type === 'frag' && node._docId) {
       const doc = documents.find(d => d.id === node._docId);
@@ -360,6 +374,13 @@ async function initGraph() {
   });
 
   nodeDetailCl.addEventListener('click', () => { nodeDetail.style.display = 'none'; });
+
+  // Modo fragmento: ver SOLO las relaciones del fragmento seleccionado
+  nodeDetailEgo.addEventListener('click', () => {
+    if (!lastSelNode || lastSelNode._type !== 'frag') return;
+    enterEgoMode(lastSelNode._paraId || lastSelNode.id.replace('frag-', ''));
+  });
+  btnEgoExit.addEventListener('click', () => exitEgoMode());
 
   // Botón único para abrir el visor del documento original (fragmento seleccionado)
   nodeDetailView.addEventListener('click', () => {
@@ -383,7 +404,11 @@ async function initGraph() {
     slider.addEventListener('change', async () => {
       // Reactivar físicas dinámicas para reacomodar tras cambiar el slider
       network.setOptions({ physics: { enabled: true } });
-      await updateSemanticRelations();
+      if (egoCenterId) {
+        await renderEgoGraph();
+      } else {
+        await updateSemanticRelations();
+      }
     });
   }
 
@@ -392,9 +417,187 @@ async function initGraph() {
   if (toggleRelations) {
     toggleRelations.addEventListener('change', async () => {
       network.setOptions({ physics: { enabled: true } });
-      await updateSemanticRelations();
+      if (egoCenterId) {
+        await renderEgoGraph();
+      } else {
+        await updateSemanticRelations();
+      }
     });
   }
+
+  // Toggle capa inter-documental (solo relaciones entre documentos)
+  const crossdocToggle = document.getElementById('toggle-crossdoc');
+  if (crossdocToggle) {
+    crossdocToggle.addEventListener('change', async () => {
+      network.setOptions({ physics: { enabled: true } });
+      if (egoCenterId) {
+        await renderEgoGraph();
+      } else {
+        await updateSemanticRelations();
+      }
+    });
+  }
+}
+
+// ─── Modo fragmento (ego-graph unitario) ────────────────────────────────────
+// Muestra UN fragmento como centro y SOLO sus relaciones semánticas con otros
+// fragmentos (1 hop). El slider gradua el umbral/cantidad igual que en el grafo
+// completo. Hacer clic en un vecino re-centra el grafo en él.
+function enterEgoMode(paraId) {
+  if (!nodesDS || !edgesDS || !paraId) return;
+
+  let node = nodesDS.get(`frag-${paraId}`);
+  const para = allParagraphs.find(p => p.id === paraId);
+
+  if (!node && !para) return;
+  if (!node && para) {
+    const colors = getDocumentColors(
+      Math.max(documents.findIndex(d => d.id === para.document_id), 0),
+      Math.max(documents.length, 1)
+    );
+    node = {
+      id: `frag-${paraId}`,
+      label: `F${para.paragraph_index + 1}`,
+      _type: 'frag',
+      _paraId: paraId,
+      _docId: para.document_id,
+      _docMime: documents.find(d => d.id === para.document_id)?.mime_type,
+      _baseColors: colors,
+      _location: para.location,
+      _content: para.raw_content,
+    };
+  }
+
+  // Conservar el contenido original del fragmento centro para el panel lateral
+  lastSelNode = node;
+  egoCenterId = paraId;
+  if (btnEgoExit) btnEgoExit.style.display = 'inline-flex';
+  network.setOptions({ physics: { enabled: true } });
+  renderEgoGraph();
+}
+
+function exitEgoMode() {
+  egoCenterId = null;
+  if (btnEgoExit) btnEgoExit.style.display = 'none';
+  nodeDetail.style.display = 'none';
+  refreshGraph();
+}
+
+async function renderEgoGraph() {
+  if (!egoCenterId || !nodesDS || !edgesDS) return;
+
+  const centerPara = allParagraphs.find(p => p.id === egoCenterId);
+  if (!centerPara) return;
+
+  const docIdx = documents.findIndex(d => d.id === centerPara.document_id);
+  const colors = getDocumentColors(Math.max(docIdx, 0), Math.max(documents.length, 1));
+
+  const slider = document.getElementById('similarity-threshold');
+  const sliderPct = slider ? parseFloat(slider.value) : 75;
+  const threshold = sliderPct / 100;
+  const maxRelations = Math.round(2000 * ((100 - sliderPct) / 50));
+
+  const paragraphIds = allParagraphs.map(p => p.id);
+
+  const crossDocToggle = document.getElementById('toggle-crossdoc');
+  const crossDoc = crossDocToggle ? crossDocToggle.checked : false;
+
+  let relations = [];
+  try {
+    const response = await api('/api/query/relations', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ paragraphIds, threshold, maxRelations, centerId: egoCenterId, crossDoc }),
+    });
+    relations = response.relations || [];
+    semanticRelations = relations;
+  } catch (err) {
+    console.error('Error al cargar relaciones del fragmento:', err);
+  }
+
+  // Reconstruir el grafo: solo centro + vecinos con relación + aristas 1-hop
+  nodesDS.clear();
+  edgesDS.clear();
+
+  nodesDS.add({
+    id: `frag-${egoCenterId}`,
+    label: `F${centerPara.paragraph_index + 1}`,
+    size: 18,
+    color: {
+      background: colors.docBorder,
+      border: '#ffffff',
+      hover: { background: colors.docHoverBorder, border: '#ffffff' }
+    },
+    font: { color: '#ffffff', size: 13, bold: true },
+    _type: 'frag',
+    _paraId: egoCenterId,
+    _docId: centerPara.document_id,
+    _docMime: documents.find(d => d.id === centerPara.document_id)?.mime_type,
+    _baseColors: colors,
+    _location: centerPara.location,
+    _content: centerPara.raw_content,
+  });
+
+  const added = new Set([egoCenterId]);
+  relations.forEach(rel => {
+    const otherId = rel.source_id === egoCenterId ? rel.target_id : rel.source_id;
+    if (added.has(otherId)) return;
+    added.add(otherId);
+
+    const other = allParagraphs.find(p => p.id === otherId);
+    if (!other) return;
+
+    const oColors = getDocumentColors(
+      Math.max(documents.findIndex(d => d.id === other.document_id), 0),
+      Math.max(documents.length, 1)
+    );
+
+    nodesDS.add({
+      id: `frag-${otherId}`,
+      label: `F${other.paragraph_index + 1}`,
+      size: 10,
+      color: {
+        background: oColors.fragBg,
+        border: oColors.fragBorder,
+        hover: { background: oColors.fragHoverBg, border: oColors.fragHoverBorder }
+      },
+      font: { color: oColors.fragText, size: 10 },
+      _type: 'frag',
+      _paraId: otherId,
+_docId: other.document_id,
+      _docMime: documents.find(d => d.id === other.document_id)?.mime_type,
+      _location: other.location,
+      _content: other.raw_content,
+    });
+
+    const pct = Math.round(rel.similarity * 100);
+    edgesDS.add({
+      from: `frag-${egoCenterId}`,
+      to: `frag-${otherId}`,
+      label: `${pct}%`,
+      width: 1 + rel.similarity * 4,
+      length: 160 + 140 * (1 - rel.similarity),
+      color: { color: getSemanticColor(rel.similarity), hover: getSemanticColor(rel.similarity) },
+      font: { color: '#8b949e', size: 10, background: '#0d1117' },
+      physics: true,
+      _type: 'semantic'
+    });
+  });
+
+  network.stabilize(200);
+
+  // Actualizar el panel de detalle con el resumen del fragmento centro
+  nodeDetailT.textContent = `F${centerPara.paragraph_index + 1} — Fragmento central`;
+  nodeDetailB.textContent = centerPara.raw_content || '';
+  if (relations.length > 0) {
+    nodeDetailB.textContent += `\n\n--- ${relations.length} relación(es) semántica(s) ---`;
+  }
+  nodeDetail.style.display = 'block';
+  updateNodeViewButton({
+    _type: 'frag',
+    _paraId: egoCenterId,
+    _docId: centerPara.document_id,
+  });
 }
 
 async function refreshGraph() {
@@ -450,7 +653,11 @@ async function refreshGraph() {
         paras.sort((a, b) => a.paragraph_index - b.paragraph_index);
 
         paras.forEach((p, idx) => {
-          allParagraphs.push(p);
+          // El endpoint de párrafos no devuelve document_id: se adjunta aquí
+          // para que el modo fragmento (ego) pueda ubicar colores y docs.
+          const enriched = { ...p, document_id: doc.id };
+          allParagraphs.push(enriched);
+
           const fragId = `frag-${p.id}`;
           
           nodesDS.add({
@@ -464,6 +671,7 @@ async function refreshGraph() {
             },
             font: { color: colors.fragText, size: 10 },
             _type: 'frag',
+            _paraId: p.id,
             _docId: doc.id,
             _docMime: doc.mime_type,
             _baseColors: colors,
@@ -508,6 +716,20 @@ async function refreshGraph() {
   });
 }
 
+function getSemanticColor(similarity) {
+  const t = Math.max(0, Math.min(1, (similarity - 0.7) / 0.3));
+  
+  const r = Math.round(124 + t * (63 - 124));
+  const g = Math.round(58 + t * (185 - 58));
+  const b = Math.round(237 + t * (80 - 237));
+  
+  return `rgba(${r}, ${g}, ${b}, ${0.3 + t * 0.7})`;
+}
+
+function getSemanticWidth(similarity) {
+  return 1 + similarity * 4;
+}
+
 async function updateSemanticRelations() {
   if (!edgesDS) return;
 
@@ -535,27 +757,24 @@ async function updateSemanticRelations() {
 
   try {
     const paragraphIds = allParagraphs.map(p => p.id);
+    // La cantidad de relaciones pintadas se gradúa con el mismo slider:
+    // umbral alto → pocas (solo las más similares), umbral bajo → hasta 2000.
+    // El cap evita que vis-network se congele con miles de aristas.
+    const sliderPct = slider ? parseFloat(slider.value) : 75;
+    const maxRelations = Math.round(2000 * ((100 - sliderPct) / 50));
+
+    // Capa inter-documental: solo relaciones entre fragmentos de documentos
+    // distintos (requiere 2+ docs cargados).
+    const crossDocToggle = document.getElementById('toggle-crossdoc');
+    const crossDoc = crossDocToggle ? crossDocToggle.checked : false;
+
     const response = await api('/api/query/relations', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ paragraphIds, threshold }),
+      body: JSON.stringify({ paragraphIds, threshold, maxRelations, crossDoc }),
     });
 
     const relations = response.relations || [];
-
-    function getSemanticColor(similarity) {
-      const t = Math.max(0, Math.min(1, (similarity - 0.7) / 0.3));
-      
-      const r = Math.round(124 + t * (63 - 124));
-      const g = Math.round(58 + t * (185 - 58));
-      const b = Math.round(237 + t * (80 - 237));
-      
-      return `rgba(${r}, ${g}, ${b}, ${0.3 + t * 0.7})`;
-    }
-
-    function getSemanticWidth(similarity) {
-      return 1 + similarity * 4;
-    }
 
     relations.forEach(rel => {
       const { source_id, target_id, similarity } = rel;
@@ -577,9 +796,14 @@ async function updateSemanticRelations() {
     semanticRelations = relations;
 
     if (relations.length > 0) {
-      // Asentamos con más iteraciones para absorber el "golpe" al agregar
-      // muchas aristas semánticas y dejar los nodos quietos (clicables).
-      network.stabilize(250);
+      // Con pocas aristas la física reacomoda y el grafo queda clicable.
+      // Con muchas, estabilizar 250 iteraciones congela la UI: se deja la
+      // simulación libre y se repinta una sola vez.
+      if (relations.length <= 200) {
+        network.stabilize(250);
+      } else {
+        network.stabilize(30);
+      }
     }
   } catch (err) {
     console.error('Error al actualizar las relaciones semánticas:', err);
@@ -642,6 +866,7 @@ function renderExplorer() {
               <div class="explorer-frag-row">
                 <div class="explorer-frag-header">
                   <span class="explorer-frag-index">Fragmento ${p.paragraph_index + 1}</span>
+                  <button class="badge-relation badge-seq" onclick="window.enterEgoMode('${p.id}')" title="Ver solo este fragmento y sus relaciones">🌐 Relaciones</button>
                   <button class="badge-relation badge-seq" onclick="window.focusNodeInGraph('frag-${p.id}')" title="Ver en grafo">Ver Nodo</button>
                 </div>
                 <div class="explorer-frag-text">${p.raw_content}</div>
@@ -663,11 +888,21 @@ function updateNodeViewButton(node) {
   if (!nodeDetailView) return;
   const show = !!lastSelNode;
   nodeDetailView.style.display = show ? 'block' : 'none';
+  if (nodeDetailEgo) {
+    nodeDetailEgo.style.display = show ? 'block' : 'none';
+  }
   if (show) {
     const isPdf = node._docMime && String(node._docMime).toLowerCase().includes('pdf');
     nodeDetailView.textContent = isPdf ? 'Ver en PDF' : 'Ver en documento';
   }
 }
+
+window.enterEgoMode = function(paraId) {
+  // Asegurarse de estar en la pestaña de grafo
+  const graphTabBtn = document.querySelector('.tab[data-tab="graph"]');
+  if (graphTabBtn) graphTabBtn.click();
+  enterEgoMode(paraId);
+};
 
 window.focusNodeInGraph = function(nodeId) {
   const graphTabBtn = document.querySelector('.tab[data-tab="graph"]');

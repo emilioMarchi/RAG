@@ -2,6 +2,7 @@ import { EmbeddingService } from './embeddingService.js';
 import { LLMService } from './llmService.js';
 import { HybridSearchService, type ScoredChunk } from './hybridSearchService.js';
 import { RerankingService, type RerankStrategy } from './rerankingService.js';
+import type { LocalReranker } from './localReranker.js';
 import { query } from '../config/db.js';
 
 export interface RAGSource {
@@ -50,12 +51,18 @@ export class HierarchicalRAGModule {
       enableReranking?: boolean;
       /** Estrategia de re-ranking: 'hybrid' (determinista) | 'llm' (default 'hybrid') */
       rerankStrategy?: RerankStrategy;
+      /** Reranker cross-encoder local (transformers.js) para strategy 'local' */
+      localReranker?: LocalReranker;
       /** Activar recuperación de parent chunks (default true) */
       enableParentChunks?: boolean;
     } = {}
   ) {
     this.hybridSearch = new HybridSearchService();
-    this.reranker = new RerankingService(llm, options.rerankStrategy ?? 'hybrid');
+    this.reranker = new RerankingService(
+      llm,
+      options.rerankStrategy ?? 'hybrid',
+      options.localReranker ?? null
+    );
   }
 
   async query(userQuery: string, topDocs = 5, _topParagraphs = 10, _similarityThreshold = 0): Promise<RAGResult> {

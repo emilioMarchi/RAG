@@ -755,6 +755,29 @@ body {
 }
 .node-detail-view:hover { filter: brightness(1.1); }
 
+.node-detail-actions {
+  display: flex; gap: 8px; margin-top: 12px;
+}
+.node-detail-actions .node-detail-view,
+.node-detail-actions .node-detail-ego {
+  margin-top: 0; width: auto; flex: 1;
+}
+.node-detail-ego {
+  background: var(--glass-hi);
+  color: var(--text-1);
+  border: 1px solid var(--border-hi);
+  border-radius: var(--r-sm);
+  padding: 7px 12px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  transition: background .15s, border-color .15s;
+}
+.node-detail-ego:hover { background: var(--bg-2); border-color: var(--accent); color: var(--text-1); }
+
+.btn-ego-exit { padding: 0 10px; border-radius: var(--r-sm); background: var(--glass-hi); border: 1px solid var(--border-hi); color: var(--text-1); cursor: pointer; font-size: 12px; transition: background .15s, border-color .15s; }
+.btn-ego-exit:hover { background: var(--bg-2); border-color: var(--accent); }
+
 /* ============================================================
    Chat Tab
    ============================================================ */

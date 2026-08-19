@@ -1,9 +1,149 @@
-[EMBED DEBUG] dim=1536 text.length=55 body={"model":"models/gemini-embedding-001","content":{"parts":[{"text":"Principios generales relativos a la protección de datos"}]},"outputDimensionality":1536}
-[EMBED DEBUG] status=200 response={"embedding":{"values":[-0.041157685,0.013364206,0.041615836,-0.024223728,0.007669862,0.03559189,0.008033308,0.0018412005,0.03765356,0.02652535,-0.0059717307,-0.0016914742,-0.015591413,0.013966051,0.12084018,0.04380655,-0.00012344198,-0.015399176,0.0026998743,-0.009357944,0.028685628,0.0034922378,-0
-[AgentRouter] Decision para sessionId: session_ymka1kveui_1786627632958 -> intent: rag, query refinada: "Contenido y cantidad de ítems del artículo 4 de la ley de datos", motivo: El usuario solicita información específica sobre el contenido de un artículo legal.
-[AgentTools] Error en searchDocuments: QueryTimeoutError: La consulta RAG superó el presupuesto de 45000ms.
-    at Timeout.<anonymous> (D:\Emi\apps\RAG\src\services\iterativeRAGEngine.ts:71:43)
-    at listOnTimeout (node:internal/timers:605:17)
-    at process.processTimers (node:internal/timers:541:7)
-[AgentLLM] Enviando 2 mensajes a generateChatResponse...
+RAG Studio - Launcher
+============================================
 
+[1/6] Checking Docker Desktop...
+      Docker OK.
+[2/6] Checking dependencies...
+  node_modules already present.
+[3/6] Checking .env...
+[4/6] Starting database (PostgreSQL + pgvector)...
+  Existing container found, starting it...
+  Waiting for PostgreSQL to be ready...
+  Database ready.
+[5/6] Running migrations...
+
+> rag-studio@1.0.0 migrate
+> tsx src/migrate.ts
+
+◇ injected env (18) from .env // tip: ⌘ custom filepath { path: '/custom/path/.env' }
+Skipping migration: 001_initial.sql (already applied)
+Skipping migration: 002_bm25_indexes.sql (already applied)
+Skipping migration: 003_parent_chunks.sql (already applied)
+Skipping migration: 004_graph_rag.sql (already applied)
+Skipping migration: 005_query_evaluations.sql (already applied)
+Skipping migration: 006_chunk_locations.sql (already applied)
+Skipping migration: 007_local_embeddings.sql (already applied)
+All migrations already applied.
+[6/6] Starting RAG Studio (web)...
+
+> rag-studio@1.0.0 dev
+> tsx watch src/index.ts
+
+◇ injected env (18) from .env // tip: ◈ encrypted .env [www.dotenvx.com]
+[LocalEmbedding] Cargando modelo local: Xenova/paraphrase-multilingual-MiniLM-L12-v2 (dims=384)
+[LocalEmbedding] Modelo local listo.
+[LocalReranker] Cargando cross-encoder local: SugoLabs/mmarco-mMiniLMv2-L12-H384-v1
+[LocalReranker] Cross-encoder local listo.
+RAG API running on http://localhost:3000
+Health: http://localhost:3000/api/health
+Embeddings: local (Xenova/paraphrase-multilingual-MiniLM-L12-v2, 384d) | Rerank: local
+Relations error: error: syntax error at or near ">="
+    at D:\Emi\apps\RAG\node_modules\pg-pool\index.js:45:11
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+    at async <anonymous> (D:\Emi\apps\RAG\src\routes\query.ts:288:22) {
+  length: 92,
+  severity: 'ERROR',
+  code: '42601',
+  detail: undefined,
+  hint: undefined,
+  position: '501',
+  internalPosition: undefined,
+  internalQuery: undefined,
+  where: undefined,
+  schema: undefined,
+  table: undefined,
+  column: undefined,
+  dataType: undefined,
+  constraint: undefined,
+  file: 'scan.l',
+  line: '1244',
+  routine: 'scanner_yyerror'
+}
+Relations error: error: syntax error at or near ">="
+    at D:\Emi\apps\RAG\node_modules\pg-pool\index.js:45:11
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+    at async <anonymous> (D:\Emi\apps\RAG\src\routes\query.ts:288:22) {
+  length: 92,
+  severity: 'ERROR',
+  code: '42601',
+  detail: undefined,
+  hint: undefined,
+  position: '501',
+  internalPosition: undefined,
+  internalQuery: undefined,
+  where: undefined,
+  schema: undefined,
+  table: undefined,
+  column: undefined,
+  dataType: undefined,
+  constraint: undefined,
+  file: 'scan.l',
+  line: '1244',
+  routine: 'scanner_yyerror'
+}
+Relations error: error: syntax error at or near ">="
+    at D:\Emi\apps\RAG\node_modules\pg-pool\index.js:45:11
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+    at async <anonymous> (D:\Emi\apps\RAG\src\routes\query.ts:288:22) {
+  length: 92,
+  severity: 'ERROR',
+  code: '42601',
+  detail: undefined,
+  hint: undefined,
+  position: '501',
+  internalPosition: undefined,
+  internalQuery: undefined,
+  where: undefined,
+  schema: undefined,
+  table: undefined,
+  column: undefined,
+  dataType: undefined,
+  constraint: undefined,
+  file: 'scan.l',
+  line: '1244',
+  routine: 'scanner_yyerror'
+}
+Relations error: error: syntax error at or near ">="
+    at D:\Emi\apps\RAG\node_modules\pg-pool\index.js:45:11
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+    at async <anonymous> (D:\Emi\apps\RAG\src\routes\query.ts:288:22) {
+  length: 92,
+  severity: 'ERROR',
+  code: '42601',
+  detail: undefined,
+  hint: undefined,
+  position: '501',
+  internalPosition: undefined,
+  internalQuery: undefined,
+  where: undefined,
+  schema: undefined,
+  table: undefined,
+  column: undefined,
+  dataType: undefined,
+  constraint: undefined,
+  file: 'scan.l',
+  line: '1244',
+  routine: 'scanner_yyerror'
+}
+Relations error: error: syntax error at or near ">="
+    at D:\Emi\apps\RAG\node_modules\pg-pool\index.js:45:11
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+    at async <anonymous> (D:\Emi\apps\RAG\src\routes\query.ts:288:22) {
+  length: 92,
+  severity: 'ERROR',
+  code: '42601',
+  detail: undefined,
+  hint: undefined,
+  position: '501',
+  internalPosition: undefined,
+  internalQuery: undefined,
+  where: undefined,
+  schema: undefined,
+  table: undefined,
+  column: undefined,
+  dataType: undefined,
+  constraint: undefined,
+  file: 'scan.l',
+  line: '1244',
+  routine: 'scanner_yyerror'
+}

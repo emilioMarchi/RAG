@@ -2,9 +2,11 @@ import { Router, Request, Response } from 'express';
 import { HierarchicalRAGModule } from '../services/ragEngine.js';
 import { IterativeRAGEngine } from '../services/iterativeRAGEngine.js';
 import { EmbeddingService } from '../services/embeddingService.js';
+import { LocalEmbeddingService } from '../services/localEmbeddingService.js';
 import { LLMService } from '../services/llmService.js';
 import { QueryEvaluator } from '../services/queryEvaluator.js';
 import { query } from '../config/db.js';
+import { env } from '../config/env.js';
 
 export function createQueryRouter(
   rag: HierarchicalRAGModule,
@@ -12,7 +14,11 @@ export function createQueryRouter(
   llm?: LLMService
 ): Router {
   const router = Router();
-  const embedder = new EmbeddingService();
+  const embedder =
+    env.EMBEDDING_PROVIDER === 'local'
+      ? new LocalEmbeddingService(env.EMBEDDING_MODEL, env.EMBEDDING_DIMENSIONS)
+      : new EmbeddingService();
+  const embedDims = env.EMBEDDING_PROVIDER === 'local' ? env.EMBEDDING_DIMENSIONS : 1536;
   const evaluator = llm ? new QueryEvaluator(llm) : null;
 
   router.post('/query', async (req: Request, res: Response) => {
@@ -91,8 +97,8 @@ export function createQueryRouter(
         return;
       }
 
-      // Embed con dimensión high (1536d) para comparar con los fragmentos
-      const highVector = await embedder.generateEmbedding(userQuery.trim(), 1536);
+      // Embed con la dimensión del provider (1536d Gemini | 384d local)
+      const highVector = await embedder.generateEmbedding(userQuery.trim(), embedDims);
 
       // Calculamos la similitud coseno (1 - distancia coseno) para los párrafos más
       // similares. pgvector: <=> devuelve distancia coseno (0 = idénticos, 2 = opuestos);
@@ -244,12 +250,25 @@ export function createQueryRouter(
 
   /**
    * POST /api/query/relations
-   * Devuelve las relaciones semánticas cruzadas (similitud >= threshold) 
+   * Devuelve las relaciones semánticas cruzadas (similitud >= threshold)
    * entre un conjunto de IDs de fragmentos seleccionados.
+   *
+   * `maxRelations` (default 400) acota la cantidad devuelta: el grafo con
+   * physics de vis-network no escala bien con miles de aristas, y limita el
+   * número a pintar para que el slider pueda graduar la densidad sin congelar
+   * la interfaz.
+   *
+   * `centerId` (opcional) activa el "modo fragmento" (ego-graph): devuelve
+   * SOLO las relaciones del fragmento indicado con el resto del conjunto,
+   * ordenadas por similitud. Pensado para visualizar un fragmento unitario
+   * y sus relaciones uno-a-uno.
+   *
+   * `crossDoc` (opcional) filtra SOLO relaciones entre documentos distintos
+   * (capa inter-documental).
    */
   router.post('/query/relations', async (req: Request, res: Response) => {
     try {
-      const { paragraphIds, threshold } = req.body;
+      const { paragraphIds, threshold, maxRelations, centerId, crossDoc } = req.body;
 
       if (!Array.isArray(paragraphIds) || paragraphIds.length === 0) {
         res.status(400).json({ error: 'Se requiere una lista de paragraphIds válida' });
@@ -257,10 +276,22 @@ export function createQueryRouter(
       }
 
       const simThreshold = typeof threshold === 'number' ? threshold : 0.75;
+      const limit = Math.min(
+        Math.max(typeof maxRelations === 'number' ? Math.floor(maxRelations) : 400, 1),
+        2000
+      );
+
+      const isEgo = typeof centerId === 'string' && centerId.length > 0;
+      // Ego: solo relaciones del centro con cada vecino (todos los ids, sin
+      // restricción de orden). Normal: pares únicos con p1.id < p2.id.
+      const pairFilter = isEgo
+        ? 'p1.id = $4 AND p2.id <> $4'
+        : 'p1.id < p2.id';
+      const crossDocFilter = crossDoc === true ? 'AND p1.document_id <> p2.document_id' : '';
 
       const result = await query<{ source_id: string; target_id: string; similarity: number }>(
         `WITH subset AS MATERIALIZED (
-            SELECT id, embedding_high
+            SELECT id, document_id, embedding_high
             FROM document_paragraphs
             WHERE id = ANY($1::uuid[])
          )
@@ -270,13 +301,15 @@ export function createQueryRouter(
             (1 - (p1.embedding_high <=> p2.embedding_high)) as similarity
          FROM subset p1
          CROSS JOIN subset p2
-         WHERE p1.id < p2.id -- Evita duplicados y autorelaciones
+         WHERE ${pairFilter}
            AND (1 - (p1.embedding_high <=> p2.embedding_high)) >= $2
-         ORDER BY similarity DESC`,
-        [paragraphIds, simThreshold]
+           ${crossDocFilter}
+         ORDER BY similarity DESC
+         LIMIT $3`,
+        isEgo ? [paragraphIds, simThreshold, limit, centerId] : [paragraphIds, simThreshold, limit]
       );
 
-      res.json({ relations: result.rows });
+      res.json({ relations: result.rows, ego: isEgo ? centerId : null });
     } catch (error) {
       console.error('Relations error:', error);
       res.status(500).json({
@@ -301,11 +334,9 @@ export function createQueryRouter(
       }
 
       const { HybridSearchService } = await import('../services/hybridSearchService.js');
-      const { EmbeddingService } = await import('../services/embeddingService.js');
       const hybridSearch = new HybridSearchService();
-      const embedder = new EmbeddingService();
 
-      const highVector = await embedder.generateEmbedding(userQuery.trim(), 1536);
+      const highVector = await embedder.generateEmbedding(userQuery.trim(), embedDims);
       const hits = await hybridSearch.search(
         [],
         highVector,

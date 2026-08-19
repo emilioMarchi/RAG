@@ -1,7 +1,8 @@
 import type { LLMService } from './llmService.js';
 import type { ScoredChunk } from './hybridSearchService.js';
+import type { LocalReranker } from './localReranker.js';
 
-export type RerankStrategy = 'hybrid' | 'llm';
+export type RerankStrategy = 'hybrid' | 'llm' | 'local';
 
 /**
  * RerankingService
@@ -15,11 +16,15 @@ export type RerankStrategy = 'hybrid' | 'llm';
  *
  * - 'llm': usa el LLM como cross-encoder para puntuar la relevancia cruzada
  *   de cada fragmento respecto a la query original. Más preciso pero lento.
+ *
+ * - 'local': usa un cross-encoder local (transformers.js/ONNX) en CPU.
+ *   Misma precisión conceptual que 'llm' pero sin llamada de red ni API key.
  */
 export class RerankingService {
   constructor(
     private llm: LLMService | null = null,
-    private strategy: RerankStrategy = 'hybrid'
+    private strategy: RerankStrategy = 'hybrid',
+    private localReranker: LocalReranker | null = null
   ) {}
 
   /**
@@ -41,6 +46,14 @@ export class RerankingService {
       return [...candidates]
         .sort((a, b) => b.hybrid_score - a.hybrid_score)
         .slice(0, topN);
+    }
+
+    // Estrategia 'local': cross-encoder ONNX en CPU (sin red).
+    if (this.strategy === 'local') {
+      if (!this.localReranker) {
+        return candidates.slice(0, topN);
+      }
+      return this.localReranker.rerank(userQuery, candidates, topN);
     }
 
     // Estrategia 'llm': cross-encoder con el LLM.

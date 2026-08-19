@@ -100,6 +100,11 @@ export class IterativeRAGEngine {
       enableDecompose = true,
     } = this.options;
 
+    const phaseStart = Date.now();
+    const mark = (label: string) => {
+      console.log(`[RAG] ${label}: ${Date.now() - phaseStart}ms`);
+    };
+
     // ── 1. Descomponer la query en sub-consultas ─────────────────────────────
     let subQueries: string[];
     if (enableDecompose) {
@@ -107,6 +112,7 @@ export class IterativeRAGEngine {
     } else {
       subQueries = [userQuery];
     }
+    mark(`decompose (${subQueries.length} sub-queries)`);
 
     // ── 2+3. Búsqueda Híbrida por sub-query + fusión RRF multi-query ────────
     // Cada sub-query se embebe (1536d) y busca en paralelo; se omiten los docIds
@@ -129,6 +135,7 @@ export class IterativeRAGEngine {
 
     // RRF multi-query: fusionar todos los rankings de sub-queries
     let sources = this.rrfMergeMultiQuery(perQueryRankings, maxContextParagraphs);
+    mark(`hybrid search por ${subQueries.length} sub-query(s)`);
 
     if (sources.length === 0) {
       return { answer: 'No se encontraron fragmentos relevantes para tu consulta.', sources: [], iterations: 1 };
@@ -140,6 +147,7 @@ export class IterativeRAGEngine {
     } else {
       sources = sources.slice(0, finalTopK);
     }
+    mark(`rerank (${sources.length} fuentes)`);
 
     // ── 5. Bucle iterativo de expansión de contexto ──────────────────────────
     const formatContext = (srcs: RAGSource[]) =>
@@ -232,6 +240,7 @@ export class IterativeRAGEngine {
     // ── 7. Respuesta final ──────────────────────────────────────────
     const finalContextText = formatContext(ragSources);
     const answer = await this.llm.generateRAGAnswer(userQuery, finalContextText);
+    mark('respuesta LLM final');
 
     return { answer, sources: ragSources, iterations, cragDecision };
   }

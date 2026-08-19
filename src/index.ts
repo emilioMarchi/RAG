@@ -15,6 +15,7 @@ import { createDocumentRouter } from './routes/documents.js';
 import { createQueryRouter } from './routes/query.js';
 import { AgentService } from './agent/agentService.js';
 import { createAgentRouter } from './routes/agent.js';
+import { createLLMRouter } from './routes/llm.js';
 
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -78,6 +79,7 @@ async function main() {
   app.use('/api', createDocumentRouter(pipeline, chunker, storage));
   app.use('/api', createQueryRouter(rag, iterativeRag, llm));
   app.use('/api', createAgentRouter(agentService));
+  app.use('/api', createLLMRouter(llm));
 
   app.get('/api/health', (_req, res) => {
     res.json({ status: 'ok', timestamp: new Date().toISOString() });

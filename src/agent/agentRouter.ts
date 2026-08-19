@@ -1,7 +1,8 @@
 import { ConversationMemory } from './conversationMemory.js';
-import { AgentLLM } from './agentLLM.js';
+import { AgentLLM, type RouteDecision } from './agentLLM.js';
 import { AgentTools } from './tools.js';
 import { AGENT_SYSTEM_PROMPT } from './prompts.js';
+import { classifyFast } from './queryClassifier.js';
 import type { RAGSource } from '../services/ragEngine.js';
 
 export interface AgentResponse {
@@ -27,6 +28,11 @@ export class AgentRouter {
    * Procesa la entrada del usuario en un turno conversacional.
    */
   async processQuery(sessionId: string, query: string): Promise<AgentResponse> {
+    const startedAt = Date.now();
+    const mark = (label: string) => {
+      console.log(`[AgentRouter] ${label}: ${Date.now() - startedAt}ms`);
+    };
+
     // 1. Asegurar inicialización de la sesión con System Prompt
     await this.memory.getOrCreateSession(sessionId, AGENT_SYSTEM_PROMPT);
 
@@ -36,8 +42,31 @@ export class AgentRouter {
       .map(m => `${m.role.toUpperCase()}: ${m.content}`)
       .join('\n');
 
-    // 3. Decidir ruta (JSON)
-    const decision = await this.agentLLM.decideRoute(historyText, query);
+    // Filtro heurístico (sin LLM): salta router y RAG en consultas que no lo necesitan.
+    const fast = classifyFast(query);
+    if (fast !== 'ask') {
+      console.log(`[AgentRouter] Ruta rápida sin LLM para sessionId: ${sessionId} -> ${fast}`);
+    }
+
+    if (fast === 'chat') {
+      await this.memory.addMessage(sessionId, 'user', query);
+      const updatedHistory = await this.memory.getHistoryForLLM(sessionId);
+      const answer = await this.agentLLM.generateChatResponse(updatedHistory);
+      await this.memory.addMessage(sessionId, 'assistant', answer);
+      mark('chat sin RAG (1 llamada LLM)');
+      return { answer, intent: 'chat' };
+    }
+
+    // 3. Decidir ruta: heurística si es inequívoca, LLM si es ambigua
+    let decision: RouteDecision;
+    if (fast === 'list_docs') {
+      decision = { intent: 'list_docs', query: '', reason: 'heurística: inventario de documentos' };
+    } else if (fast === 'rag') {
+      decision = { intent: 'rag', query, reason: 'heurística: consulta sobre contenido documental' };
+    } else {
+      decision = await this.agentLLM.decideRoute(historyText, query);
+      mark('decideRoute (LLM)');
+    }
 
     console.log(`[AgentRouter] Decision para sessionId: ${sessionId} -> intent: ${decision.intent}, query refinada: "${decision.query}", motivo: ${decision.reason}`);
 
@@ -48,6 +77,7 @@ export class AgentRouter {
       // 4a. Ejecutar RAG
       const targetQuery = decision.query || query;
       const ragResult = await this.tools.searchDocuments(targetQuery);
+      mark('RAG completo');
 
       // RAG sin resultados relevantes: no citar contenido ajeno; responder honestamente como chat
       const noRelevant =
@@ -99,6 +129,7 @@ export class AgentRouter {
       };
       const answer = await this.agentLLM.generateChatResponse([hint, ...updatedHistory]);
       await this.memory.addMessage(sessionId, 'assistant', answer);
+      mark('list_docs completo');
 
       return {
         answer,
@@ -109,6 +140,7 @@ export class AgentRouter {
       // Volvemos a obtener el historial actualizado con el mensaje del usuario que recién agregamos
       const updatedHistory = await this.memory.getHistoryForLLM(sessionId);
       const answer = await this.agentLLM.generateChatResponse(updatedHistory);
+      mark('chat directo completo');
 
       // Guardar la respuesta del chat directo en la memoria
       await this.memory.addMessage(sessionId, 'assistant', answer);

@@ -1,7 +1,29 @@
 import OpenAI from 'openai';
+import fs from 'fs';
+import path from 'path';
 import type { ScoredChunk } from './hybridSearchService.js';
 import { env } from '../config/env.js';
 import { withRetry } from '../utils/retry.js';
+
+const LLM_DATA_DIR = path.join(process.cwd(), 'data');
+const LLM_PREF_FILE = path.join(LLM_DATA_DIR, 'llm_model_pref.json');
+
+/**
+ * Catálogo sugerido para rotación manual desde el panel. Son los modelos
+ * ':free' de OpenRouter disponibles (consultados al catálogo en vivo). Se
+ * ordenan de los más rápidos (pocos parámetros activos) a los más grandes.
+ */
+export const LLM_MODEL_CATALOG = [
+  'nvidia/nemotron-3-nano-30b-a3b:free',
+  'nvidia/nemotron-3.5-lightning:free',
+  'liquid/lfm-2.5-2.6b:free',
+  'openai/gpt-oss-20b:free',
+  'z-ai/glm-5.2:free',
+  'google/gemma-4-26b-a4b-it:free',
+  'google/gemma-4-31b-it:free',
+  'nvidia/nemotron-3-super-120b-a12b:free',
+  'nvidia/nemotron-3-ultra-550b-a55b:free',
+];
 
 const client = new OpenAI({
   baseURL: env.LLM_API_URL,
@@ -11,11 +33,58 @@ const client = new OpenAI({
   maxRetries: 0, // El retry se maneja en withRetry/complete (fallback de modelos)
 });
 
+interface ModelPref { model?: string }
+
 export class LLMService {
   private models: string[];
 
   constructor() {
-    this.models = [env.LLM_MODEL, ...(env.LLM_BACKUP_MODEL ? [env.LLM_BACKUP_MODEL] : [])];
+    const envModels = [env.LLM_MODEL, ...(env.LLM_BACKUP_MODEL ? [env.LLM_BACKUP_MODEL] : [])];
+    this.models = envModels;
+    const preferred = this.loadPreferred();
+    if (preferred && envModels.includes(preferred)) {
+      this.models = [preferred, ...envModels.filter(m => m !== preferred)];
+    }
+  }
+
+  private loadPreferred(): string | null {
+    try {
+      const raw = fs.readFileSync(LLM_PREF_FILE, 'utf8');
+      const parsed = JSON.parse(raw) as ModelPref;
+      return typeof parsed?.model === 'string' ? parsed.model : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private persistPreferred(model: string): void {
+    try {
+      fs.mkdirSync(LLM_DATA_DIR, { recursive: true });
+      fs.writeFileSync(
+        LLM_PREF_FILE,
+        JSON.stringify({ model, updatedAt: new Date().toISOString() }, null, 2)
+      );
+    } catch (e) {
+      console.warn(`[LLM] No se pudo persistir la preferencia de modelo: ${e instanceof Error ? e.message : e}`);
+    }
+  }
+
+  getActiveModels(): string[] {
+    return [...this.models];
+  }
+
+  getModelCatalog(): string[] {
+    return [...new Set([...LLM_MODEL_CATALOG, ...this.models])];
+  }
+
+  setPreferredModel(modelId: string): void {
+    const catalog = this.getModelCatalog();
+    if (!catalog.includes(modelId)) {
+      throw new Error(`Modelo no soportado: ${modelId}`);
+    }
+    this.models = [modelId, ...this.models.filter(m => m !== modelId)];
+    this.persistPreferred(modelId);
+    console.log(`[LLM] Modelo activo: ${modelId}`);
   }
 
   private isRateLimit(error: unknown): boolean {
@@ -29,13 +98,23 @@ export class LLMService {
   async complete(
     params: Omit<OpenAI.Chat.ChatCompletionCreateParams, 'model'>
   ): Promise<OpenAI.Chat.Completions.ChatCompletion> {
+    const startedAt = Date.now();
+    const tokensIn = params.messages.reduce((acc, m) => acc + (m.content?.length ?? 0), 0);
     let lastError: unknown;
     let sawRateLimit = false;
     for (const candidate of this.models) {
+      const attemptStart = Date.now();
       try {
         const result = await client.chat.completions.create({ ...params, model: candidate });
+        const used = 'usage' in result && result.usage ? result.usage : undefined;
+        console.log(
+          `[LLM] ${candidate} ok en ${Date.now() - attemptStart}ms (total ${Date.now() - startedAt}ms, charsIn=${tokensIn}, prompt_tokens=${used?.prompt_tokens ?? '?'}, completion_tokens=${used?.completion_tokens ?? '?'}, label=${this.labelFor(params)})`
+        );
         return result as OpenAI.Chat.Completions.ChatCompletion;
       } catch (error) {
+        console.log(
+          `[LLM] ${candidate} ERROR en ${Date.now() - attemptStart}ms: ${error instanceof Error ? error.message.substring(0, 120) : String(error)}`
+        );
         if (!this.isRateLimit(error)) throw error;
         lastError = error;
         sawRateLimit = true;
@@ -101,6 +180,18 @@ export class LLMService {
       prevSlash = ch === '\\' ? prevSlash + 1 : 0;
     }
     return out;
+  }
+
+  private labelFor(params: Omit<OpenAI.Chat.ChatCompletionCreateParams, 'model'>): string {
+    const joined = params.messages.map(m => String(m.content ?? '')).join('\n');
+    if (joined.includes('TRANSCRIPCIÓN LITERAL') || joined.includes('CONTEXTO RECUPERADO')) return 'rag-answer';
+    if (joined.includes('enrutador inteligente')) return 'route';
+    if (joined.includes('Descompone consultas complejas') || joined.includes('sub_queries')) return 'decompose';
+    if (joined.includes('preparar datos para RAG')) return 'enrich';
+    if (joined.includes('evalúa si el contexto recuperado es suficiente')) return 'evaluate-context';
+    if (joined.includes('evaluador de relevancia') || joined.includes('puntaje de relevancia')) return 'rerank-llm';
+    if (joined.includes('Corrective RAG') || joined.includes('relevancia del contexto') || joined.includes('CRAG')) return 'crag';
+    return 'chat';
   }
 
   async enrichChunk(documentTitle: string, docSummary: string, chunkText: string) {
@@ -222,6 +313,11 @@ REGLAS:
       async () => {
         const systemPrompt = `
 Eres un asistente experto en análisis de documentación. Responde a la pregunta del usuario de forma clara, directa y estructurada. Desarrolla la respuesta explicando el contexto de la sección/norma donde se encuentra la información. Si la respuesta involucra listas o procedimientos, enumera los elementos completos sin omitir detalles. Cita siempre el documento o sección fuente.
+
+TRANSCRIPCIÓN LITERAL (REGLAS):
+- Cuando el usuario pida el CONTENIDO TEXTUAL de un artículo, sección, párrafo o fragmento del documento (por ejemplo "¿qué dice el artículo 3?", "pasame el texto de...", "mostrame qué dice..."), transcribe el texto EXACTO y COMPLETO tal como aparece en el CONTEXTO, entre comillas o en un bloque de cita, SIN parafrasear, SIN resumir, SIN interpretar y SIN omitir partes.
+- No agregues explicaciones ni comentarios sobre el texto transcrito salvo que el usuario los pida EXPLÍCITAMENTE (por ejemplo "explicame", "resumime", "interpretá", "¿qué significa?"). Si solo pide el contenido o el texto, entregá únicamente la transcripción literal con su cita.
+- Si el fragmento recuperado está truncado o incompleto respecto de lo pedido, transcibí lo que haya y señalá con honestidad qué parte falta.
 
 IMPORTANTE: Responde utilizando EXCLUSIVAMENTE la información provista en el CONTEXTO.
 Si la respuesta no está en el contexto, indica amablemente que no dispones de esa información.

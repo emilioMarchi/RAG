@@ -186,7 +186,9 @@
 
         <!-- Similarity threshold control -->
         <div class="chat-controls">
-          <label class="chat-controls-label" for="chat-similarity-threshold">Umbral similitud:</label>
+          <label class="chat-controls-label" for="chat-model-select" title="Modelo activo para el chat (AAF = primera llamada; fallback = segunda si hay rate-limit)">Modelo LLM:</label>
+          <select id="chat-model-select" title="Rotar modelo LLM (persiste entre reinicios)"></select>
+          <label class="chat-controls-label" for="chat-similarity-threshold" style="margin-left: 8px;">Umbral similitud:</label>
           <input type="range" id="chat-similarity-threshold" min="0" max="95" value="0" step="5" />
           <span class="chat-controls-val" id="chat-threshold-val">0%</span>
           <button id="btn-reset-chat" title="Nueva Conversación" style="margin-left: auto; padding: 4px 8px; font-size: 12px; border-radius: 4px; background: var(--bg-3); border: 1px solid var(--border); color: var(--text-1); cursor: pointer;">Nueva Conversación</button>

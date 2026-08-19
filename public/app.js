@@ -1215,6 +1215,44 @@ if (chatThresholdSlider && chatThresholdVal) {
   });
 }
 
+// ─── Modelo LLM: rotación manual desde el panel ────────────────────────────
+const chatModelSelect = document.getElementById('chat-model-select');
+async function loadLlmModels() {
+  if (!chatModelSelect) return;
+  try {
+    const { active, catalog } = await api('/api/llm/models');
+    if (!Array.isArray(catalog) || catalog.length === 0) return;
+    chatModelSelect.innerHTML = catalog.map(m => {
+      const primary = active[0] === m ? ' · activo' : '';
+      const backup = active[1] === m ? ' · fallback' : '';
+      return `<option value="${m}"${active[0] === m ? ' selected' : ''}>${m}${primary || backup}</option>`;
+    }).join('');
+    chatModelSelect.disabled = false;
+  } catch (e) {
+    console.error('No se pudieron cargar los modelos LLM:', e);
+  }
+}
+if (chatModelSelect) {
+  chatModelSelect.disabled = true;
+  chatModelSelect.addEventListener('change', async () => {
+    const model = chatModelSelect.value;
+    if (!model) return;
+    try {
+      const { active } = await api('/api/llm/models', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model }),
+      });
+      loadLlmModels();
+      appendMsg('assistant', `Modelo LLM rotado a: **${active[0]}**`);
+    } catch (e) {
+      alert('Error al rotar modelo: ' + e.message);
+      loadLlmModels();
+    }
+  });
+}
+loadLlmModels();
+
 async function sendChat() {
   const q = chatInput.value.trim();
   if (!q) return;

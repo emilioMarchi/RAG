@@ -46,9 +46,7 @@
         <label class="upload-strategy">
           <span>Estrategia de ingesta</span>
           <select id="ingest-strategy">
-            <option value="auto">Automática</option>
             <option value="generic">Genérica (multipropósito)</option>
-            <option value="legal">Normativa / Legal</option>
           </select>
         </label>
         <button class="btn-upload" id="btn-pick-file">Seleccionar archivo</button>
@@ -170,6 +168,7 @@
 
       <!-- ── Chat View ────────────────────────────────────────── -->
       <div class="tab-content" id="tab-chat">
+        <div class="chat-status" id="chat-status" hidden></div>
         <div class="chat-messages" id="chat-messages">
           <div class="chat-welcome">
             <div class="chat-welcome-icon">⬡</div>

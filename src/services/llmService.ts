@@ -8,6 +8,12 @@ import { withRetry } from '../utils/retry.js';
 const LLM_DATA_DIR = path.join(process.cwd(), 'data');
 const LLM_PREF_FILE = path.join(LLM_DATA_DIR, 'llm_model_pref.json');
 
+// Watchdog del streaming: si el proveedor no emite el primer token en este
+// tiempo o se queda silencioso entre tokens, se aborta el stream y se cambia
+// al siguiente modelo (los :free de OpenRouter se quedan colgados en cola).
+const LLM_STREAM_FIRST_TOKEN_MS = Number(process.env.LLM_STREAM_FIRST_TOKEN_MS ?? 60_000);
+const LLM_STREAM_STALL_MS = Number(process.env.LLM_STREAM_STALL_MS ?? 45_000);
+
 /**
  * Catálogo sugerido para rotación manual desde el panel. Son los modelos
  * ':free' de OpenRouter disponibles (consultados al catálogo en vivo). Se
@@ -114,6 +120,77 @@ export class LLMService {
       } catch (error) {
         console.log(
           `[LLM] ${candidate} ERROR en ${Date.now() - attemptStart}ms: ${error instanceof Error ? error.message.substring(0, 120) : String(error)}`
+        );
+        if (!this.isRateLimit(error)) throw error;
+        lastError = error;
+        sawRateLimit = true;
+      }
+    }
+    if (sawRateLimit) {
+      console.warn(
+        `[LLM] todos los modelos rate-limited (429). Modelos: ${this.models.join(', ')}`
+      );
+    }
+    throw lastError;
+  }
+
+  async completeStreaming(
+    params: Omit<OpenAI.Chat.ChatCompletionCreateParams, 'model' | 'stream'>,
+    onToken: (text: string) => void
+  ): Promise<string> {
+    const startedAt = Date.now();
+    let lastError: unknown;
+    let sawRateLimit = false;
+    for (const candidate of this.models) {
+      const attemptStart = Date.now();
+      const controller = new AbortController();
+      let sawFirstChunk = false;
+      let lastChunkAt = Date.now();
+      let stalled = false;
+
+      const stallTimer = setInterval(() => {
+        const limit = sawFirstChunk ? LLM_STREAM_STALL_MS : LLM_STREAM_FIRST_TOKEN_MS;
+        if (Date.now() - lastChunkAt >= limit) {
+          stalled = true;
+          controller.abort();
+        }
+      }, 2_000);
+
+      try {
+        const stream = await client.chat.completions.create(
+          {
+            ...params,
+            model: candidate,
+            stream: true,
+          },
+          { signal: controller.signal }
+        );
+        let out = '';
+        for await (const chunk of stream) {
+          sawFirstChunk = true;
+          lastChunkAt = Date.now();
+          const delta = chunk.choices?.[0]?.delta?.content;
+          if (delta) {
+            out += delta;
+            onToken(delta);
+          }
+        }
+        clearInterval(stallTimer);
+        console.log(
+          `[LLM] ${candidate} stream ok en ${Date.now() - attemptStart}ms (charsOut=${out.length}, label=${this.labelFor(params)})`
+        );
+        return out;
+      } catch (error) {
+        clearInterval(stallTimer);
+        if (stalled) {
+          console.warn(
+            `[LLM] ${candidate} stream colgado (${sawFirstChunk ? 'sin tokens por ' + LLM_STREAM_STALL_MS : 'sin primer token por ' + LLM_STREAM_FIRST_TOKEN_MS}ms). Cambiando de modelo...`
+          );
+          lastError = new Error(`Stream de ${candidate} colgado por time-out`);
+          continue;
+        }
+        console.log(
+          `[LLM] ${candidate} stream ERROR en ${Date.now() - attemptStart}ms: ${error instanceof Error ? error.message.substring(0, 120) : String(error)}`
         );
         if (!this.isRateLimit(error)) throw error;
         lastError = error;
@@ -308,7 +385,11 @@ REGLAS:
     );
   }
 
-  async generateRAGAnswer(userQuery: string, contextText: string): Promise<string> {
+  async generateRAGAnswer(
+    userQuery: string,
+    contextText: string,
+    onToken?: (text: string) => void
+  ): Promise<string> {
     return withRetry(
       async () => {
         const systemPrompt = `
@@ -336,15 +417,30 @@ ${contextText}
 ---------------------------
 `;
 
-        const response = await this.complete({
-          messages: [
-            { role: 'system', content: systemPrompt },
-            { role: 'user', content: userQuery },
-          ],
-          temperature: 0.2,
-        });
+        const respond = async (): Promise<string> => {
+          if (onToken) {
+            return this.completeStreaming(
+              {
+                messages: [
+                  { role: 'system', content: systemPrompt },
+                  { role: 'user', content: userQuery },
+                ],
+                temperature: 0.2,
+              },
+              onToken
+            );
+          }
+          const response = await this.complete({
+            messages: [
+              { role: 'system', content: systemPrompt },
+              { role: 'user', content: userQuery },
+            ],
+            temperature: 0.2,
+          });
+          return response.choices[0].message.content || 'Sin respuesta generada.';
+        };
 
-        return response.choices[0].message.content || 'Sin respuesta generada.';
+        return withRetry(respond, { maxRetries: 3, baseDelay: 2000, label: 'rag-answer' });
       },
       { maxRetries: 3, baseDelay: 2000, label: 'rag-answer' }
     );

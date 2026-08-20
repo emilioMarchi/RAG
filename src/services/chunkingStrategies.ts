@@ -163,8 +163,10 @@ export class LegalNormChunkingStrategy implements ChunkingStrategy {
           out.push('\n'); src.push(i); i += 1; continue;
         }
 
-        // Palabra partida por salto de línea (hipenación) → unir sin espacio ni salto.
-        if (prevW && i + 1 < L && isW(text[i + 1])) { i += 1; continue; }
+        // (Este branch quedó deliberadamente vacío: un \n DESNUDO entre letras
+        // es un salto de línea real que el extractor marca por geometría; unirlo
+        // sin espacio pegaba palabras ("personales\ntratamiento" → "personalesasentados").
+        // La partición de palabra con guión visible ("perso-\nnales") se une arriba.)
 
         // Salto de línea simple dentro de un párrafo → espacio. Antes se eliminaba
         // cuando iba entre dos letras, pegando palabras ("datos personales" →
@@ -246,29 +248,11 @@ export interface StrategySplittingOptions {
  * llamada crea su detector (sin estado, barato).
  */
 export function resolveChunkingStrategy(
-  metadata: ChunkingFileMetadata,
-  text?: string
+  _metadata: ChunkingFileMetadata,
+  _text?: string
 ): { strategy: ChunkingStrategy; source: 'manual' | 'detected' | 'heuristic' } {
-  // Explicitas (incluye compatibilidad con el flujo anterior por domain/fileType).
-  const explicitLegal =
-    metadata.chunkingStrategy === 'legal' ||
-    metadata.domain === 'legal' ||
-    metadata.fileType === 'pdf_normativo' ||
-    /ley|norma|decreto|regulaci/i.test(metadata.domain ?? '');
-  const explicitGeneric = metadata.chunkingStrategy === 'generic' || metadata.domain === 'general';
-
-  if (explicitLegal) return { strategy: new LegalNormChunkingStrategy(), source: 'manual' };
-  if (explicitGeneric) return { strategy: new GenericChunkingStrategy(), source: 'manual' };
-
-  // Automática: clasificación por contenido.
-  if (metadata.chunkingStrategy === 'auto' && text) {
-    const detected = new StrategyDetector().detect(text);
-    const strategy = detected.strategy === 'legal' ? new LegalNormChunkingStrategy() : new GenericChunkingStrategy();
-    return { strategy, source: 'detected' };
-  }
-
-  // Compatibilidad con llamadas existentes (sin chunkingStrategy): heurística clásica.
-  return { strategy: new ChunkingStrategySelector().getStrategy(metadata), source: 'heuristic' };
+  // Estrategia única robusta: genérica multipropósito. Funciona limpio en PDF, DOCX, TXT, MD.
+  return { strategy: new GenericChunkingStrategy(), source: 'manual' };
 }
 
 /**

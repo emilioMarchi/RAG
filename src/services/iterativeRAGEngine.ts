@@ -16,6 +16,13 @@ export class QueryTimeoutError extends Error {
   }
 }
 
+export type RAGPhase = 'decompose' | 'search' | 'rerank' | 'answer';
+
+export interface RAGPhaseContext {
+  onPhase?: (phase: RAGPhase) => void;
+  onToken?: (text: string) => void;
+}
+
 export class IterativeRAGEngine {
   private hybridSearch: HybridSearchService;
   private reranker: RerankingService;
@@ -63,17 +70,18 @@ export class IterativeRAGEngine {
     userQuery: string,
     topDocs = 5,
     _topParagraphs = 10,
-    _similarityThreshold = 0
+    _similarityThreshold = 0,
+    ctx?: RAGPhaseContext
   ): Promise<RAGResult & { iterations: number }> {
     const timeoutMs = this.options.timeoutMs ?? 0;
     if (!timeoutMs || timeoutMs <= 0) {
-      return this.runQuery(userQuery, topDocs);
+      return this.runQuery(userQuery, topDocs, ctx);
     }
 
     let timer: NodeJS.Timeout | undefined;
     try {
       return await Promise.race([
-        this.runQuery(userQuery, topDocs),
+        this.runQuery(userQuery, topDocs, ctx),
         new Promise<never>((_, reject) => {
           timer = setTimeout(() => reject(new QueryTimeoutError(timeoutMs)), timeoutMs);
         }),
@@ -85,7 +93,8 @@ export class IterativeRAGEngine {
 
   private async runQuery(
     userQuery: string,
-    topDocs = 5
+    topDocs = 5,
+    ctx?: RAGPhaseContext
   ): Promise<RAGResult & { iterations: number }> {
     const {
       maxContextParagraphs = 20,
@@ -112,6 +121,7 @@ export class IterativeRAGEngine {
     } else {
       subQueries = [userQuery];
     }
+    ctx?.onPhase?.('decompose');
     mark(`decompose (${subQueries.length} sub-queries)`);
 
     // ── 2+3. Búsqueda Híbrida por sub-query + fusión RRF multi-query ────────
@@ -135,6 +145,7 @@ export class IterativeRAGEngine {
 
     // RRF multi-query: fusionar todos los rankings de sub-queries
     let sources = this.rrfMergeMultiQuery(perQueryRankings, maxContextParagraphs);
+    ctx?.onPhase?.('search');
     mark(`hybrid search por ${subQueries.length} sub-query(s)`);
 
     if (sources.length === 0) {
@@ -147,6 +158,7 @@ export class IterativeRAGEngine {
     } else {
       sources = sources.slice(0, finalTopK);
     }
+    ctx?.onPhase?.('rerank');
     mark(`rerank (${sources.length} fuentes)`);
 
     // ── 5. Bucle iterativo de expansión de contexto ──────────────────────────
@@ -239,7 +251,12 @@ export class IterativeRAGEngine {
 
     // ── 7. Respuesta final ──────────────────────────────────────────
     const finalContextText = formatContext(ragSources);
-    const answer = await this.llm.generateRAGAnswer(userQuery, finalContextText);
+    ctx?.onPhase?.('answer');
+    const answer = await this.llm.generateRAGAnswer(
+      userQuery,
+      finalContextText,
+      ctx?.onToken
+    );
     mark('respuesta LLM final');
 
     return { answer, sources: ragSources, iterations, cragDecision };

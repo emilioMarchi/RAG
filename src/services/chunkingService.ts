@@ -44,6 +44,14 @@ const OCR_ENABLED = process.env.OCR_ENABLED !== 'false';
 const LAYOUT_HEADER_RATIO = 0.12;
 const LAYOUT_FOOTER_RATIO = 0.12;
 const LAYOUT_MIN_REPEAT_PAGES = 3;
+// Umbral de separación horizontal (fracción del ancho de página) entre dos items
+// consecutivos del text layer para insertar un espacio. Los PDFs parten las
+// palabras en runs sin espacio ("personales"+"asentados"); si el hueco supera
+// este umbral (≈1.2pt en A4), es un espacio entre palabras.
+const PDF_ITEM_SPACE_GAP = 0.002;
+// Si el salto vertical entre items supera esta fracción de la altura del item
+// previo, se trata de una línea nueva (no un superíndice ni subíndice).
+const PDF_ITEM_LINE_Y_RATIO = 0.5;
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const TESSDATA_DIR = path.resolve(__dirname, '..', '..', 'tessdata');
@@ -304,6 +312,7 @@ export class ChunkingService {
     const items: PdfTextItem[] = [];
     const ranges: PdfPage['ranges'] = [];
     let pageText = '';
+    let prevItem: PdfTextItem | null = null;
 
     for (const raw of tc.items ?? []) {
       const str = typeof raw.str === 'string' ? raw.str : '';
@@ -318,18 +327,48 @@ export class ChunkingService {
 
       const item: PdfTextItem = { str, x, y, width, height };
 
+      const sep =
+        str.length > 0 && !raw.hasEOL
+          ? this.itemSeparator(prevItem, item, pageText)
+          : '';
       const start = pageText.length;
-      pageText += str;
+      pageText += sep + str;
+      items.push(item);
 
       if (str.length > 0) {
-        ranges.push({ start, end: start + str.length, item });
+        ranges.push({ start: start + sep.length, end: start + sep.length + str.length, item });
       }
       if (raw.hasEOL) {
         pageText += '\n';
       }
+      prevItem = item;
     }
 
     return { pageNumber, text: pageText, items, ranges };
+  }
+
+  /**
+   * Resuelve el separador entre dos items consecutivos del text layer
+   * (pdfjs los entrega partidos por runs, sin espacios): '' si el texto ya está
+   * separado, '\n' si cambia de línea (salto vertical) y ' ' si hay un hueco
+   * horizontal entre palabras.
+   */
+  private itemSeparator(
+    prev: PdfTextItem | null,
+    curr: { x: number; y: number; height: number; str: string },
+    pageText: string
+  ): string {
+    if (!prev) return '';
+    const last = pageText[pageText.length - 1];
+    if (last === '\n' || last === ' ') return '';
+    if (curr.str.startsWith(' ')) return '';
+
+    const dy = Math.abs(curr.y - prev.y);
+    if (dy > prev.height * PDF_ITEM_LINE_Y_RATIO) return '\n';
+
+    const gap = curr.x - (prev.x + prev.width);
+    if (gap > PDF_ITEM_SPACE_GAP) return ' ';
+    return '';
   }
 
   /**
@@ -403,12 +442,15 @@ export class ChunkingService {
 
     for (const row of rows) {
       if (blocked.has(this.normalizeLayoutText(row.text))) continue;
+      let prevItem: PdfTextItem | null = null;
       for (const i of row.indices) {
         const it = page.items[i];
+        const sep = this.itemSeparator(prevItem, it, pageText);
         const start = pageText.length;
-        pageText += it.str;
+        pageText += sep + it.str;
         textItems.push(it);
-        if (it.str.length > 0) ranges.push({ start, end: start + it.str.length, item: it });
+        if (it.str.length > 0) ranges.push({ start: start + sep.length, end: start + sep.length + it.str.length, item: it });
+        prevItem = it;
       }
       pageText += '\n';
     }
@@ -889,8 +931,9 @@ export class ChunkingService {
     for (let i = 1; i < rawChildSlices.length; i++) {
       const next = rawChildSlices[i];
       if (current.text.length < childMinChars) {
+        const sep = current.text.endsWith('\n') || next.text.startsWith('\n') ? '' : ' ';
         current = {
-          text: current.text + next.text,
+          text: current.text + sep + next.text,
           start: current.start,
         };
       } else {

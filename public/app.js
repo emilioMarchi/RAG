@@ -1253,6 +1253,49 @@ if (chatModelSelect) {
 }
 loadLlmModels();
 
+// ─── Chat streaming (SSE) ────────────────────────────────────────────────────
+const CHAT_PHASE_LABELS = {
+  route: 'Clasificando tu consulta…',
+  decompose: 'Analizando la consulta…',
+  search: 'Buscando en la base de conocimiento…',
+  rerank: 'Comparando fragmentos…',
+  answer: 'Generando respuesta…',
+};
+
+async function streamAgentChat(url, body, handlers) {
+  const res = await fetch(BASE_URL + url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok || !res.body) throw new Error('El servidor no pudo iniciar el stream (HTTP ' + res.status + ')');
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let donePayload = null;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const events = buffer.split('\n\n');
+    buffer = events.pop() ?? '';
+    for (const ev of events) {
+      const line = ev.split('\n').find(l => l.startsWith('data: '));
+      if (!line) continue;
+      let data;
+      try { data = JSON.parse(line.slice(6)); } catch { continue; }
+      if (data.type === 'phase' && handlers.onPhase) handlers.onPhase(data.phase);
+      else if (data.type === 'token' && handlers.onToken) handlers.onToken(data.text);
+      else if (data.type === 'done') donePayload = data;
+      else if (data.type === 'error') throw new Error(data.message || 'Error del motor');
+    }
+  }
+  if (!donePayload) throw new Error('El stream terminó sin respuesta del motor');
+  return donePayload;
+}
+
 async function sendChat() {
   const q = chatInput.value.trim();
   if (!q) return;
@@ -1266,38 +1309,47 @@ async function sendChat() {
   chatInput.style.height = 'auto';
   btnSend.disabled = true;
 
-  const loadingEl = appendMsg('assistant', '…', true);
+  const loadingEl = appendMsg('assistant', '', false);
+  const bubble = loadingEl.querySelector('.chat-bubble');
+  bubble.innerHTML = '';
+  const contentEl = document.createElement('div');
+  contentEl.className = 'chat-typing';
+  bubble.appendChild(contentEl);
 
+  const chatStatus = document.getElementById('chat-status');
+  const setPhase = (phase) => {
+    if (!chatStatus) return;
+    chatStatus.textContent = CHAT_PHASE_LABELS[phase] || phase;
+    chatStatus.hidden = false;
+  };
+
+  let full = '';
   try {
-    const result = await api('/api/agent/chat', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query: q, sessionId }),
+    const done = await streamAgentChat('/api/agent/chat/stream', { query: q, sessionId }, {
+      onPhase: setPhase,
+      onToken: (text) => {
+        full += text;
+        contentEl.textContent = full;
+        chatMsgs.scrollTop = chatMsgs.scrollHeight;
+      },
     });
 
-    loadingEl.querySelector('.chat-bubble').innerHTML = renderAnswer(result.answer, buildCitationLabels(result.sources));
-    loadingEl.querySelector('.chat-bubble').classList.remove('loading');
+    if (chatStatus) chatStatus.hidden = true;
+    bubble.innerHTML = renderAnswer(done.content, buildCitationLabels(done.sources));
 
-    if (result.iterations > 0) {
+    if (done.iterations > 0) {
       const itEl = document.createElement('div');
       itEl.className = 'chat-iterations';
-      itEl.textContent = `🔁 ${result.iterations} iteración${result.iterations === 1 ? '' : 'es'}`;
+      itEl.textContent = `🔁 ${done.iterations} iteración${done.iterations === 1 ? '' : 'es'}`;
       loadingEl.appendChild(itEl);
     }
-
-    if (result.sources?.length) {
-      const sourcesEl = document.createElement('div');
-      sourcesEl.className = 'chat-sources';
-      sourcesEl.innerHTML = result.sources.map(s => `
-        <div class="chat-source">
-          <div class="chat-source-title">📄 ${s.doc_title}</div>
-          <div class="chat-source-preview">${s.raw_content}</div>
-        </div>`).join('');
-      loadingEl.appendChild(sourcesEl);
-    }
   } catch (e) {
-    loadingEl.querySelector('.chat-bubble').textContent = '⚠ Error: ' + e.message;
-    loadingEl.querySelector('.chat-bubble').classList.remove('loading');
+    if (chatStatus) chatStatus.hidden = true;
+    bubble.innerHTML = '';
+    const errEl = document.createElement('div');
+    errEl.className = 'chat-bubble';
+    errEl.textContent = '⚠ Error: ' + e.message;
+    loadingEl.replaceChild(errEl, bubble);
   } finally {
     btnSend.disabled = false;
     chatMsgs.scrollTop = chatMsgs.scrollHeight;

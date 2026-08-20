@@ -1,4 +1,4 @@
-import { IterativeRAGEngine } from '../services/iterativeRAGEngine.js';
+import { IterativeRAGEngine, type RAGPhaseContext } from '../services/iterativeRAGEngine.js';
 import { query } from '../config/db.js';
 import type { RAGSource } from '../services/ragEngine.js';
 
@@ -34,13 +34,14 @@ export class AgentTools {
   /**
    * Ejecuta la búsqueda de documentos utilizando el motor RAG iterativo.
    */
-  async searchDocuments(query: string): Promise<ToolResult> {
+  async searchDocuments(query: string, ctx?: RAGPhaseContext): Promise<ToolResult> {
     try {
       const result = await this.iterativeRag.query(
         query,
         this.config.topDocs,
         this.config.topParagraphs,
-        0
+        0,
+        ctx
       );
 
       return {

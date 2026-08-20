@@ -66,7 +66,8 @@ export class AgentLLM {
    */
   async generateNoResultResponse(
     userQuery: string,
-    history: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>
+    history: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>,
+    onToken?: (text: string) => void
   ): Promise<string> {
     const hint: { role: 'system'; content: string } = {
       role: 'system',
@@ -75,17 +76,21 @@ export class AgentLLM {
         'Responde con honestidad indicando que no se encontró información sobre el tema en la base de conocimiento, ' +
         'sin inventar datos ni citar documentos. Ofrece ayuda alternativa o pedí más detalles si hace falta.',
     };
-    return this.generateChatResponse([hint, ...history]);
+    return this.generateChatResponse([hint, ...history], onToken);
   }
 
   /**
    * Genera una respuesta conversacional directa sin consultar RAG.
    */
   async generateChatResponse(
-    messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>
+    messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>,
+    onToken?: (text: string) => void
   ): Promise<string> {
     try {
       console.log(`[AgentLLM] Enviando ${messages.length} mensajes a generateChatResponse...`);
+      if (onToken) {
+        return await this.llmService.completeStreaming({ messages, temperature: 0.7 }, onToken);
+      }
       const response = await this.llmService.complete({
         messages,
         temperature: 0.7,

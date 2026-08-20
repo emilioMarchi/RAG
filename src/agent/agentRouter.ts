@@ -13,6 +13,11 @@ export interface AgentResponse {
   iterations?: number;
 }
 
+export interface AgentPhaseContext {
+  phase: (phase: string) => void;
+  token: (text: string) => void;
+}
+
 export class AgentRouter {
   private memory: ConversationMemory;
   private agentLLM: AgentLLM;
@@ -27,11 +32,16 @@ export class AgentRouter {
   /**
    * Procesa la entrada del usuario en un turno conversacional.
    */
-  async processQuery(sessionId: string, query: string): Promise<AgentResponse> {
+  async processQuery(
+    sessionId: string,
+    query: string,
+    ctx?: AgentPhaseContext
+  ): Promise<AgentResponse> {
     const startedAt = Date.now();
     const mark = (label: string) => {
       console.log(`[AgentRouter] ${label}: ${Date.now() - startedAt}ms`);
     };
+    ctx?.phase('route');
 
     // 1. Asegurar inicialización de la sesión con System Prompt
     await this.memory.getOrCreateSession(sessionId, AGENT_SYSTEM_PROMPT);
@@ -51,7 +61,8 @@ export class AgentRouter {
     if (fast === 'chat') {
       await this.memory.addMessage(sessionId, 'user', query);
       const updatedHistory = await this.memory.getHistoryForLLM(sessionId);
-      const answer = await this.agentLLM.generateChatResponse(updatedHistory);
+      ctx?.phase('answer');
+      const answer = await this.agentLLM.generateChatResponse(updatedHistory, ctx?.token);
       await this.memory.addMessage(sessionId, 'assistant', answer);
       mark('chat sin RAG (1 llamada LLM)');
       return { answer, intent: 'chat' };
@@ -76,7 +87,10 @@ export class AgentRouter {
     if (decision.intent === 'rag') {
       // 4a. Ejecutar RAG
       const targetQuery = decision.query || query;
-      const ragResult = await this.tools.searchDocuments(targetQuery);
+      const ragResult = await this.tools.searchDocuments(targetQuery, {
+        onPhase: (phase) => ctx?.phase(phase),
+        onToken: (text) => ctx?.token(text),
+      });
       mark('RAG completo');
 
       // RAG sin resultados relevantes: no citar contenido ajeno; responder honestamente como chat
@@ -87,7 +101,8 @@ export class AgentRouter {
 
       if (noRelevant) {
         const history = await this.memory.getHistoryForLLM(sessionId);
-        const honest = await this.agentLLM.generateNoResultResponse(targetQuery, history);
+        ctx?.phase('answer');
+        const honest = await this.agentLLM.generateNoResultResponse(targetQuery, history, ctx?.token);
         await this.memory.addMessage(sessionId, 'assistant', honest);
         return {
           answer: honest,
@@ -127,7 +142,8 @@ export class AgentRouter {
         role: 'system',
         content: `El usuario preguntó qué documentos hay disponibles. Aquí está la información exacta de la base de datos:\n${listContext}\nPresenta esta información de forma clara y amigable al usuario.`,
       };
-      const answer = await this.agentLLM.generateChatResponse([hint, ...updatedHistory]);
+      ctx?.phase('answer');
+      const answer = await this.agentLLM.generateChatResponse([hint, ...updatedHistory], ctx?.token);
       await this.memory.addMessage(sessionId, 'assistant', answer);
       mark('list_docs completo');
 
@@ -139,7 +155,8 @@ export class AgentRouter {
       // 4c. Respuesta de chat directa
       // Volvemos a obtener el historial actualizado con el mensaje del usuario que recién agregamos
       const updatedHistory = await this.memory.getHistoryForLLM(sessionId);
-      const answer = await this.agentLLM.generateChatResponse(updatedHistory);
+      ctx?.phase('answer');
+      const answer = await this.agentLLM.generateChatResponse(updatedHistory, ctx?.token);
       mark('chat directo completo');
 
       // Guardar la respuesta del chat directo en la memoria

@@ -8,13 +8,13 @@ echo.
 cd /d "%~dp0"
 
 REM 1. Check Docker running
-echo [1/6] Checking Docker Desktop...
+echo [1/7] Checking Docker Desktop...
 docker info >nul 2>&1
 if errorlevel 1 goto nodocker
 echo       Docker OK.
 
 REM 2. Install dependencies if missing
-echo [2/6] Checking dependencies...
+echo [2/7] Checking dependencies...
 if exist "node_modules" goto deps_ok
 echo   Installing dependencies (this may take a while)...
 call npm install
@@ -23,7 +23,7 @@ if errorlevel 1 goto npm_fail
 echo   node_modules already present.
 
 REM 3. Ensure .env exists
-echo [3/6] Checking .env...
+echo [3/7] Checking .env...
 if exist ".env" goto env_ok
 echo   Creating .env from template...
 copy /y ".env.example" ".env" >nul
@@ -32,7 +32,7 @@ echo   .env created. Fill in the API keys before using.
 :env_ok
 
 REM 4. Start database container
-echo [4/6] Starting database (PostgreSQL + pgvector)...
+echo [4/7] Starting database (PostgreSQL + pgvector)...
 docker container inspect pgvector >nul 2>&1
 if errorlevel 1 goto compose_up
 echo   Existing container found, starting it...
@@ -57,12 +57,17 @@ goto wait_db
 echo   Database ready.
 
 REM 5. Run migrations
-echo [5/6] Running migrations...
+echo [5/7] Running migrations...
 call npm run migrate
 if errorlevel 1 goto migrate_fail
 
-REM 6. Launch app (web interface)
-echo [6/6] Starting RAG Studio (web)...
+REM 6. Pre-cargar modelos locales (embedding + reranker)
+echo [6/7] Pre-cargando modelos locales (primera vez descarga ~200MB)...
+call npx tsx src/warmup.ts
+if errorlevel 1 goto warmup_fail
+
+REM 7. Launch app (web interface)
+echo [7/7] Starting RAG Studio (web)...
 start "" http://localhost:3000
 call npm run dev
 echo.
@@ -76,15 +81,34 @@ echo.
 goto end
 
 :npm_fail
+echo.
 echo   [ERROR] npm install failed.
+echo.
 goto end
 
 :env_fail
+echo.
 echo   [ERROR] Could not create .env
+echo.
+goto end
+
+:db_fail
+echo.
+echo   [ERROR] PostgreSQL no esta listo tras 40 intentos.
+echo.
 goto end
 
 :migrate_fail
+echo.
 echo   [ERROR] Migration failed.
+echo.
+goto end
+
+:warmup_fail
+echo.
+echo   [ERROR] Fallo al pre-cargar modelos locales.
+echo   Verifica conexion a internet (descarga de HF) y espacio en disco.
+echo.
 goto end
 
 :end

@@ -33,14 +33,14 @@ describe('ChunkingStrategySelector', () => {
 })
 
 describe('LegalNormChunkingStrategy', () => {
-  it('reconstructs words split by page-break hyphens', () => {
+  it('reconstruye la palabra partida por guión visible de salto de página', () => {
     const s = new LegalNormChunkingStrategy()
     expect(s.prepare('perso-\nnales').text).toBe('personales')
   })
 
-  it('reconstructs words split by newline without hyphen', () => {
+  it('un \\n desnudo entre letras es un salto de línea real → espacio, no pega palabras', () => {
     const s = new LegalNormChunkingStrategy()
-    expect(s.prepare('perso\nnales').text).toBe('personales')
+    expect(s.prepare('personales\nasentados').text).toBe('personales asentados')
   })
 
   it('keeps long definitions in a single child chunk instead of splitting them', () => {

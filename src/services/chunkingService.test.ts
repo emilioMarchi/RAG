@@ -431,4 +431,27 @@ describe('extractText PDF', () => {
     expect(tesseract.createWorker).not.toHaveBeenCalled()
     expect(result).toContain('real PDF text layer')
   })
+
+  it('inserts spaces between text runs que pdfjs parte sin espacio (words pegadas)', async () => {
+    pdfTestState.items = [
+      { str: 'personales', width: 60, height: 12, transform: [1, 0, 0, 1, 60, 750] },
+      { str: 'asentados', width: 60, height: 12, transform: [1, 0, 0, 1, 130, 750] },
+      { str: 'detratamiento', width: 70, height: 12, transform: [1, 0, 0, 1, 200, 740] },
+    ]
+    const result = await real(tmpFile, 'application/pdf')
+    expect(result).toContain('personales asentados')
+  })
+
+  it('no une palabras que ya traen su espacio y respeta saltos de línea', async () => {
+    pdfTestState.items = [
+      { str: 'texto ', width: 40, height: 12, transform: [1, 0, 0, 1, 40, 740] },
+      { str: 'pegado', width: 50, height: 12, transform: [1, 0, 0, 1, 90, 740] },
+      { str: 'línea nueva', width: 80, height: 12, transform: [1, 0, 0, 1, 40, 720] },
+      { str: 'misma línea', width: 70, height: 12, transform: [1, 0, 0, 1, 130, 720], hasEOL: true },
+    ]
+    const result = await real(tmpFile, 'application/pdf')
+    expect(result).toContain('texto pegado')
+    expect(result).toContain('línea nueva')
+    expect(result).toContain('misma línea')
+  })
 })

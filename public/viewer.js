@@ -37,6 +37,200 @@ let docViewerPdfInstance = null; // Referencia al objeto pdfjs actual
 let docViewerRenderedItems = []; // Referencia al array rendered de páginas
 let rawTextLines = []; // Para búsqueda en archivos de texto plano
 
+// ─── Navegador de Chunks (Fragmentos) y Selector de Color ──────────────────
+const chunkNavEl = document.getElementById('viewer-chunk-nav');
+const chunkStatusEl = document.getElementById('viewer-chunk-status');
+const chunkPrevEl = document.getElementById('viewer-chunk-prev');
+const chunkNextEl = document.getElementById('viewer-chunk-next');
+const highlightColorInput = document.getElementById('viewer-highlight-color');
+const pdfScaleSelect = document.getElementById('viewer-pdf-scale');
+const scaleBoxEl = document.getElementById('viewer-scale-box');
+
+let currentDocumentChunks = []; // todos los chunks del documento actual con ubicación válida
+let activeChunkIndex = -1;      // índice del chunk actual
+let currentActiveChunk = null;   // referencia al chunk activo actualmente
+
+let currentPdfObjects = [];        // objetos de página precargados
+let currentPdfLocation = null;      // ubicación original
+let currentPdfFragmentText = null;    // fragmento original
+
+if (pdfScaleSelect) {
+  pdfScaleSelect.addEventListener('change', () => {
+    if (docViewerPdfInstance) {
+      reRenderPdfWithNewScale();
+    }
+  });
+}
+
+function hexToRgba(hex, alpha) {
+  hex = hex.replace('#', '');
+  const r = parseInt(hex.substring(0, 2), 16);
+  const g = parseInt(hex.substring(2, 4), 16);
+  const b = parseInt(hex.substring(4, 6), 16);
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
+function updateHighlightColorStyles(hexColor) {
+  const bgRgba = hexToRgba(hexColor, 0.35);
+  const pulseRgba = hexToRgba(hexColor, 0.6);
+  localStorage.setItem('viewer-highlight-color-hex', hexColor);
+
+  document.documentElement.style.setProperty('--pdf-hl-color', bgRgba);
+  document.documentElement.style.setProperty('--pdf-hl-pulse-color', pulseRgba);
+  
+  const textBgRgba = hexToRgba(hexColor, 0.18);
+  const textBorderRgba = hexColor;
+  document.documentElement.style.setProperty('--text-hl-color', textBgRgba);
+  document.documentElement.style.setProperty('--text-hl-border-color', textBorderRgba);
+}
+
+// Inicializar el color preferido del resaltador
+const defaultColor = localStorage.getItem('viewer-highlight-color-hex') || '#f59e0b';
+if (highlightColorInput) {
+  highlightColorInput.value = defaultColor;
+  updateHighlightColorStyles(defaultColor);
+  highlightColorInput.addEventListener('input', (e) => {
+    updateHighlightColorStyles(e.target.value);
+  });
+}
+
+function updateChunkNavUI() {
+  if (!chunkStatusEl || !chunkPrevEl || !chunkNextEl) return;
+  if (currentDocumentChunks.length === 0) {
+    chunkStatusEl.textContent = 'Frag. 0/0';
+    chunkPrevEl.disabled = true;
+    chunkNextEl.disabled = true;
+    return;
+  }
+  chunkStatusEl.textContent = `Frag. ${activeChunkIndex + 1}/${currentDocumentChunks.length}`;
+  chunkPrevEl.disabled = activeChunkIndex <= 0;
+  chunkNextEl.disabled = activeChunkIndex >= currentDocumentChunks.length - 1;
+}
+
+function clearActiveChunkHighlights() {
+  document.querySelectorAll('.pdf-hl').forEach(el => el.remove());
+  document.querySelectorAll('.viewer-line.hl').forEach(el => el.classList.remove('hl'));
+}
+
+function applyHighlightToRenderedPage(item, chunk) {
+  const activeChunkText = chunk.raw_content;
+  const activeChunkPage = chunk.location?.pageNumber;
+  const textLayer = item.wrapper.querySelector('.textLayer');
+  
+  if (!activeChunkText) {
+    item.wrapper.scrollIntoView({ block: 'start', behavior: 'smooth' });
+    return;
+  }
+  
+  let spans = [];
+  if (activeChunkPage) {
+    // Primero intenta resaltado exacto en la página especificada
+    const localNeedleClean = getPageLocalNeedle(item.n, activeChunkText);
+    if (localNeedleClean) {
+      const textDivs = textLayer ? Array.from(textLayer.querySelectorAll('span')) : [];
+      const pageItem = { n: item.n, wrapper: item.wrapper, viewport: item.viewport, textLayer, textDivs };
+      const localSpans = findCleanFragmentOnPage(pageItem, localNeedleClean);
+      if (localSpans.length) {
+        spans = localSpans;
+      }
+    }
+    // Si no se encontró en la página exacta, buscar en todas las páginas (fragmento cruzado)
+    if (spans.length === 0) {
+      const textDivs = textLayer ? Array.from(textLayer.querySelectorAll('span')) : [];
+      const pageItem = { n: item.n, wrapper: item.wrapper, viewport: item.viewport, textLayer, textDivs };
+      const crossPageSpans = findFragmentAcrossPages([pageItem], activeChunkText);
+      if (crossPageSpans.size > 0) {
+        for (const [pageNum, pageSpans] of crossPageSpans) {
+          if (pageNum === item.n) {
+            spans = pageSpans;
+            break;
+          }
+        }
+      }
+    }
+  } else {
+    // Sin página definida: buscar en todas las páginas
+    const textDivs = textLayer ? Array.from(textLayer.querySelectorAll('span')) : [];
+    const pageItem = { n: item.n, wrapper: item.wrapper, viewport: item.viewport, textLayer, textDivs };
+    spans = findFragmentAcrossPages([pageItem], activeChunkText)?.get(item.n) || [];
+  }
+  
+  if (spans.length) {
+    const boxes = spansToBoxes(spans, textLayer);
+    let firstHl = null;
+    for (const box of boxes) {
+      const hl = makeHighlight(box);
+      item.wrapper.appendChild(hl);
+      if (!firstHl) firstHl = hl;
+    }
+    if (firstHl) {
+      setTimeout(() => {
+        firstHl.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      }, 100);
+    }
+  } else {
+    item.wrapper.scrollIntoView({ block: 'start', behavior: 'smooth' });
+  }
+}
+
+async function jumpToChunk(index) {
+  if (index < 0 || index >= currentDocumentChunks.length) return;
+  activeChunkIndex = index;
+  updateChunkNavUI();
+
+  const chunk = currentDocumentChunks[activeChunkIndex];
+  clearActiveChunkHighlights();
+  currentActiveChunk = chunk;
+
+  const label = [
+    chunk.location?.pageNumber ? `Página ${chunk.location.pageNumber}` : null,
+    chunk.location?.startLine ? `Línea ${chunk.location.startLine}${chunk.location.endLine ? `–${chunk.location.endLine}` : ''}` : null,
+  ].filter(Boolean).join(' · ');
+  viewerTarget.textContent = label ? `Fragmento → ${label}` : 'Documento completo';
+
+  const isPdf = lastDocInfo && lastDocInfo.mimeType.includes('pdf');
+  if (isPdf) {
+    if (!docViewerPdfInstance || !docViewerRenderedItems) return;
+    const pageNum = chunk.location.pageNumber || 1;
+    const item = docViewerRenderedItems.find(r => r.n === pageNum);
+    if (!item) return;
+
+    if (!item.rendered) {
+      item.wrapper.scrollIntoView({ block: 'start', behavior: 'smooth' });
+    } else {
+      applyHighlightToRenderedPage(item, chunk);
+    }
+  } else {
+    const start = chunk.location.startLine || 1;
+    const end = chunk.location.endLine || start;
+    let firstHighlight = null;
+    for (let i = start; i <= end; i++) {
+      const lineEl = viewerText.querySelector(`.viewer-line[data-line="${i}"]`);
+      if (lineEl) {
+        lineEl.classList.add('hl');
+        if (!firstHighlight) firstHighlight = lineEl;
+      }
+    }
+    if (firstHighlight) {
+      firstHighlight.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    }
+  }
+}
+
+if (chunkPrevEl && chunkNextEl) {
+  chunkPrevEl.addEventListener('click', () => {
+    if (activeChunkIndex > 0) {
+      jumpToChunk(activeChunkIndex - 1);
+    }
+  });
+
+  chunkNextEl.addEventListener('click', () => {
+    if (activeChunkIndex < currentDocumentChunks.length - 1) {
+      jumpToChunk(activeChunkIndex + 1);
+    }
+  });
+}
+
 function api(path, opts = {}) {
   return fetch((window.location.origin || '') + path, opts).then(async res => {
     if (!res.ok) {
@@ -53,7 +247,7 @@ viewerEl.addEventListener('click', (e) => {
 });
 
 // ─── Apertura principal ──────────────────────────────────────────────────
-window.openDocViewer = async function (docId, location, mimeType, title, fragmentText) {
+window.openDocViewer = async function (docId, location, mimeType, title, fragmentText, paragraphId = null) {
   if (!docId) return;
   lastDocInfo = { docId, mimeType: (mimeType || '').toLowerCase(), title: title || 'Documento' };
   const isPdf = lastDocInfo.mimeType.includes('pdf');
@@ -76,7 +270,29 @@ window.openDocViewer = async function (docId, location, mimeType, title, fragmen
   docViewerPdfInstance = null;
   docViewerRenderedItems = [];
   rawTextLines = [];
-  searchBoxEl.style.display = 'flex';
+
+  // Elementos separadores condicionales
+  const sep1 = document.getElementById('viewer-sep-1');
+  const sep2 = document.getElementById('viewer-sep-2');
+
+  if (isPdf) {
+    if (searchBoxEl) searchBoxEl.style.display = 'flex';
+    if (scaleBoxEl) scaleBoxEl.style.display = 'flex';
+    if (sep1) sep1.style.display = 'block';
+    if (sep2) sep2.style.display = 'block';
+    if (pdfScaleSelect) pdfScaleSelect.value = 'auto'; // Zoom por defecto
+  } else {
+    if (searchBoxEl) searchBoxEl.style.display = 'none';
+    if (scaleBoxEl) scaleBoxEl.style.display = 'none';
+    if (sep1) sep1.style.display = 'none';
+    if (sep2) sep2.style.display = 'none';
+  }
+
+  // Reiniciar navegador de fragmentos
+  currentDocumentChunks = [];
+  activeChunkIndex = -1;
+  currentActiveChunk = paragraphId || location ? { location, raw_content: fragmentText, id: paragraphId } : null;
+  if (chunkNavEl) chunkNavEl.style.display = 'none';
 
   // Limpiar contenedores y preparar el modo según tipo de archivo
   viewerPdf.innerHTML = '';
@@ -92,6 +308,40 @@ window.openDocViewer = async function (docId, location, mimeType, title, fragmen
     await renderText(docId, location);
   }
   viewerScroll.scrollTop = 0;
+
+  // Cargar chunks para permitir navegación
+  try {
+    const chunks = await api(`/api/documents/${docId}/paragraphs`);
+    currentDocumentChunks = chunks.filter(c => c.location && (c.location.pageNumber || c.location.startLine));
+    if (currentDocumentChunks.length > 0) {
+      if (paragraphId) {
+        activeChunkIndex = currentDocumentChunks.findIndex(c => c.id === paragraphId);
+      }
+      if (activeChunkIndex === -1 && location) {
+        activeChunkIndex = currentDocumentChunks.findIndex(c => 
+          (location.pageNumber != null && c.location.pageNumber != null && c.location.pageNumber === location.pageNumber) ||
+          (location.startLine != null && c.location.startLine != null && c.location.startLine === location.startLine) ||
+          (location.startChar != null && c.location.startChar != null && c.location.startChar === location.startChar) ||
+          (location.endChar != null && c.location.endChar != null && c.location.endChar === location.endChar)
+        );
+      }
+      if (activeChunkIndex === -1) {
+        activeChunkIndex = 0;
+      }
+      
+      currentActiveChunk = currentDocumentChunks[activeChunkIndex];
+      const activeChunkLabel = [
+        currentActiveChunk.location?.pageNumber ? `Página ${currentActiveChunk.location.pageNumber}` : null,
+        currentActiveChunk.location?.startLine ? `Línea ${currentActiveChunk.location.startLine}${currentActiveChunk.location.endLine ? `–${currentActiveChunk.location.endLine}` : ''}` : null,
+      ].filter(Boolean).join(' · ');
+      viewerTarget.textContent = activeChunkLabel ? `Fragmento → ${activeChunkLabel}` : 'Documento completo';
+
+      if (chunkNavEl) chunkNavEl.style.display = 'flex';
+      updateChunkNavUI();
+    }
+  } catch (err) {
+    console.error('Error al cargar fragmentos del documento:', err);
+  }
 };
 
 window.closeDocViewer = closeDocViewer;
@@ -104,8 +354,27 @@ function closeDocViewer() {
     pdfIntersectionObserver.disconnect();
     pdfIntersectionObserver = null;
   }
-  searchBoxEl.style.display = 'none';
+  if (searchBoxEl) searchBoxEl.style.display = 'none';
+  if (scaleBoxEl) scaleBoxEl.style.display = 'none';
+  
+  const sep1 = document.getElementById('viewer-sep-1');
+  const sep2 = document.getElementById('viewer-sep-2');
+  if (sep1) sep1.style.display = 'none';
+  if (sep2) sep2.style.display = 'none';
+  
   clearSearchHighlights();
+
+  // Limpiar estado de fragmentos
+  currentDocumentChunks = [];
+  activeChunkIndex = -1;
+  currentActiveChunk = null;
+  if (chunkNavEl) chunkNavEl.style.display = 'none';
+
+  // Limpiar estado de PDF zoom
+  currentPdfObjects = [];
+  currentPdfLocation = null;
+  currentPdfFragmentText = null;
+  if (pdfScaleSelect) pdfScaleSelect.value = 'auto';
 }
 
 // ─── Visor PDF (pdf.js) ──────────────────────────────────────────────────
@@ -132,14 +401,14 @@ async function renderPDF(docId, location, fragmentText) {
   const data = await res.arrayBuffer();
   const pdf = await window.pdfjsLib.getDocument({ data }).promise;
 
-  const targetPage = Math.max(1, Math.min(location?.pageNumber || 1, pdf.numPages));
   const maxPages = Math.min(pdf.numPages, 80);
-  let targetPageNo = targetPage;
-
-  const rendered = [];
   pdfPagesText = [];
+  currentPdfObjects = [];
+  currentPdfLocation = location;
+  currentPdfFragmentText = fragmentText;
+  docViewerPdfInstance = pdf;
 
-  // Precargar de forma concurrente el texto y los objetos de página para evitar condiciones de carrera
+  // Precargar de forma concurrente el texto y los objetos de página
   const pagePromises = [];
   for (let n = 1; n <= maxPages; n++) {
     pagePromises.push(
@@ -154,8 +423,24 @@ async function renderPDF(docId, location, fragmentText) {
     );
   }
 
-  // Esperar a que todo el texto y las páginas estén listos en memoria
   const pagesObjects = await Promise.all(pagePromises);
+  currentPdfObjects = pagesObjects.filter(Boolean);
+
+  // Renderizar usando la escala configurada
+  await reRenderPdfWithNewScale();
+}
+
+async function reRenderPdfWithNewScale() {
+  if (!docViewerPdfInstance) return;
+
+  if (pdfIntersectionObserver) {
+    pdfIntersectionObserver.disconnect();
+    pdfIntersectionObserver = null;
+  }
+
+  viewerPdf.innerHTML = '';
+  const rendered = [];
+  const scaleVal = pdfScaleSelect ? pdfScaleSelect.value : 'auto';
 
   // Configurar el IntersectionObserver para cargar las páginas perezosamente
   pdfIntersectionObserver = new IntersectionObserver((entries) => {
@@ -164,7 +449,7 @@ async function renderPDF(docId, location, fragmentText) {
         const pageNum = Number(entry.target.dataset.page);
         const item = rendered.find(r => r.n === pageNum);
         if (item && !item.rendered) {
-          renderPageContent(item, pdf, location, fragmentText);
+          renderPageContent(item, docViewerPdfInstance, currentPdfLocation, currentPdfFragmentText);
         }
       }
     });
@@ -174,17 +459,22 @@ async function renderPDF(docId, location, fragmentText) {
     threshold: 0.01
   });
 
-  // Guardar referencias globales del visor
-  docViewerPdfInstance = pdf;
   docViewerRenderedItems = rendered;
 
-  // Generamos los esqueletos (wrappers vacíos) de las páginas con las dimensiones reales
+  const maxPages = currentPdfObjects.length;
   for (let n = 1; n <= maxPages; n++) {
-    const page = pagesObjects[n - 1];
+    const page = currentPdfObjects[n - 1];
     if (!page) continue;
     
     const base = page.getViewport({ scale: 1 });
-    const scale = Math.min(1.8, 1000 / base.width);
+    let scale;
+    if (scaleVal === 'auto') {
+      const containerWidth = viewerScroll.clientWidth - 40;
+      scale = Math.min(1.8, containerWidth / base.width);
+    } else {
+      scale = parseFloat(scaleVal);
+    }
+    
     const viewport = page.getViewport({ scale });
 
     const wrapper = document.createElement('div');
@@ -211,10 +501,13 @@ async function renderPDF(docId, location, fragmentText) {
     pdfIntersectionObserver.observe(wrapper);
   }
 
+  const activePageNo = currentActiveChunk?.location?.pageNumber || currentPdfLocation?.pageNumber || 1;
+  const targetPageNo = Math.max(1, Math.min(activePageNo, maxPages));
+
   // Forzar el renderizado inmediato de la página objetivo para inyectar los resaltados
   const targetItem = rendered.find(r => r.n === targetPageNo);
   if (targetItem) {
-    await renderPageContent(targetItem, pdf, location, fragmentText);
+    await renderPageContent(targetItem, docViewerPdfInstance, currentPdfLocation, currentPdfFragmentText);
   }
 
   // Hacer scroll centrado al fragmento resaltado, o al inicio de la página en su defecto
@@ -280,19 +573,53 @@ async function renderPageContent(item, pdf, location, fragmentText) {
     wrapper.appendChild(textLayer);
 
     // ── Resaltados para esta página específica (Búsqueda de fragmento en texto) ──
-    if (fragmentText) {
-      const localNeedleClean = getPageLocalNeedle(item.n, fragmentText);
+    const activeChunkText = currentActiveChunk ? currentActiveChunk.raw_content : fragmentText;
+    const activeChunkPage = currentActiveChunk?.location?.pageNumber;
+    
+    if (!activeChunkText) return;
+    
+    let spans = [];
+    if (activeChunkPage) {
+      // Primero intenta el resaltado exacto en la página especificada
+      const localNeedleClean = getPageLocalNeedle(item.n, activeChunkText);
       if (localNeedleClean) {
         const pageItem = { n: item.n, wrapper, viewport, textLayer, textDivs };
-        const spans = findCleanFragmentOnPage(pageItem, localNeedleClean);
-        if (spans.length) {
-          const boxes = spansToBoxes(spans, textLayer);
-          for (const box of boxes) {
-            wrapper.appendChild(makeHighlight(box));
-          }
-          wrapper.style.borderColor = 'var(--accent)';
+        const localSpans = findCleanFragmentOnPage(pageItem, localNeedleClean);
+        if (localSpans.length) {
+          spans = localSpans;
         }
       }
+      // Si no se encontró en la página exacta, intentar búsqueda en todas las páginas
+      // (para fragmentos que cruzan límites de página)
+      if (spans.length === 0) {
+        const pageItem = { n: item.n, wrapper, viewport, textLayer, textDivs };
+        const crossPageSpans = findFragmentAcrossPages([pageItem], activeChunkText);
+        if (crossPageSpans.size > 0) {
+          for (const [pageNum, pageSpans] of crossPageSpans) {
+            if (pageNum === item.n) {
+              spans = pageSpans;
+              break;
+            }
+          }
+        }
+      }
+    } else {
+      // Sin página definida: buscar en todas las páginas
+      const pageItem = { n: item.n, wrapper, viewport, textLayer, textDivs };
+      spans = findFragmentAcrossPages([pageItem], activeChunkText)?.get(item.n) || [];
+    }
+    
+    if (spans.length) {
+      const boxes = spansToBoxes(spans, textLayer);
+      for (const box of boxes) {
+        wrapper.appendChild(makeHighlight(box));
+      }
+      setTimeout(() => {
+        const firstHl = wrapper.querySelector('.pdf-hl');
+        if (firstHl) {
+          firstHl.scrollIntoView({ block: 'center', behavior: 'smooth' });
+        }
+      }, 100);
     }
   } catch (err) {
     console.error(`Error renderizando página ${item.n}:`, err);

@@ -195,18 +195,23 @@ async function renderPDF(docId, location, fragmentText) {
     pdfIntersectionObserver.observe(wrapper);
   }
 
-  // Guiar el desplazamiento inicial a la página objetivo
-  let pageToScroll = targetPageNo;
-
-  // Hacer scroll a la página seleccionada/relevante
-  const scrollTo = Array.from(viewerPdf.querySelectorAll('.pdf-page'))
-    .find(p => Number(p.dataset.page) === pageToScroll);
-  if (scrollTo) {
-    // Retrasar levemente para asegurar que el scroll se aplique después de montar
-    setTimeout(() => {
-      scrollTo.scrollIntoView({ block: 'start', behavior: 'smooth' });
-    }, 100);
+  // Forzar el renderizado inmediato de la página objetivo para inyectar los resaltados
+  const targetItem = rendered.find(r => r.n === targetPageNo);
+  if (targetItem) {
+    await renderPageContent(targetItem, pdf, location, fragmentText);
   }
+
+  // Hacer scroll centrado al fragmento resaltado, o al inicio de la página en su defecto
+  setTimeout(() => {
+    if (targetItem) {
+      const hlDiv = targetItem.wrapper.querySelector('.pdf-hl');
+      if (hlDiv) {
+        hlDiv.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      } else {
+        targetItem.wrapper.scrollIntoView({ block: 'start', behavior: 'smooth' });
+      }
+    }
+  }, 100);
 }
 
 async function renderPageContent(item, pdf, location, fragmentText) {

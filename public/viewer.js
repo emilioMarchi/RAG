@@ -137,6 +137,25 @@ async function renderPDF(docId, location, fragmentText) {
   let targetPageNo = targetPage;
 
   const rendered = [];
+  pdfPagesText = [];
+
+  // Precargar de forma concurrente el texto y los objetos de página para evitar condiciones de carrera
+  const pagePromises = [];
+  for (let n = 1; n <= maxPages; n++) {
+    pagePromises.push(
+      pdf.getPage(n).then(async (page) => {
+        const tc = await page.getTextContent();
+        pdfPagesText[n] = tc.items.map(item => item.str).join(' ');
+        return page;
+      }).catch(err => {
+        console.error(`Error precargando página ${n}:`, err);
+        return null;
+      })
+    );
+  }
+
+  // Esperar a que todo el texto y las páginas estén listos en memoria
+  const pagesObjects = await Promise.all(pagePromises);
 
   // Configurar el IntersectionObserver para cargar las páginas perezosamente
   pdfIntersectionObserver = new IntersectionObserver((entries) => {
@@ -161,7 +180,9 @@ async function renderPDF(docId, location, fragmentText) {
 
   // Generamos los esqueletos (wrappers vacíos) de las páginas con las dimensiones reales
   for (let n = 1; n <= maxPages; n++) {
-    const page = await pdf.getPage(n);
+    const page = pagesObjects[n - 1];
+    if (!page) continue;
+    
     const base = page.getViewport({ scale: 1 });
     const scale = Math.min(1.8, 1000 / base.width);
     const viewport = page.getViewport({ scale });
@@ -186,11 +207,6 @@ async function renderPDF(docId, location, fragmentText) {
       loader,
       rendered: false
     });
-
-    // Cargar asíncronamente el texto plano para el buscador
-    page.getTextContent().then(tc => {
-      pdfPagesText[n] = tc.items.map(item => item.str).join(' ');
-    }).catch(() => {});
 
     pdfIntersectionObserver.observe(wrapper);
   }
@@ -265,15 +281,17 @@ async function renderPageContent(item, pdf, location, fragmentText) {
 
     // ── Resaltados para esta página específica (Búsqueda de fragmento en texto) ──
     if (fragmentText) {
-      const pageItem = { n: item.n, wrapper, viewport, textLayer, textDivs };
-      const matchedLinePerPage = findFragmentAcrossPages([pageItem], fragmentText);
-      const spans = matchedLinePerPage.get(item.n) || [];
-      if (spans.length) {
-        const boxes = spansToBoxes(spans, textLayer);
-        for (const box of boxes) {
-          wrapper.appendChild(makeHighlight(box));
+      const localNeedleClean = getPageLocalNeedle(item.n, fragmentText);
+      if (localNeedleClean) {
+        const pageItem = { n: item.n, wrapper, viewport, textLayer, textDivs };
+        const spans = findCleanFragmentOnPage(pageItem, localNeedleClean);
+        if (spans.length) {
+          const boxes = spansToBoxes(spans, textLayer);
+          for (const box of boxes) {
+            wrapper.appendChild(makeHighlight(box));
+          }
+          wrapper.style.borderColor = 'var(--accent)';
         }
-        wrapper.style.borderColor = 'var(--accent)';
       }
     }
   } catch (err) {
@@ -282,6 +300,78 @@ async function renderPageContent(item, pdf, location, fragmentText) {
       item.loader.textContent = `Error al cargar la página ${item.n}`;
     }
   }
+}
+
+// Resuelve la porción del fragmento de texto limpio (sin espacios) que corresponde a una página
+function getPageLocalNeedle(pageNum, fragmentText) {
+  if (!fragmentText || !pdfPagesText || pdfPagesText.length === 0) return null;
+
+  // Convertir los textos planos de todas las páginas a limpio sin espacios
+  const cleanPageTexts = pdfPagesText.map(t => (t || '').replace(/\s+/g, ''));
+  const fullCleanText = cleanPageTexts.join('');
+
+  // Calcular desplazamientos de caracteres limpios acumulados por página
+  const pageOffsets = [];
+  let acc = 0;
+  for (let n = 1; n < cleanPageTexts.length; n++) {
+    pageOffsets[n] = acc;
+    acc += cleanPageTexts[n].length;
+  }
+
+  const cleanNeedle = fragmentText.replace(/\s+/g, '');
+  const globalIdx = fullCleanText.toLowerCase().indexOf(cleanNeedle.toLowerCase());
+
+  if (globalIdx === -1) return null;
+
+  const globalStart = globalIdx;
+  const globalEnd = globalIdx + cleanNeedle.length;
+
+  const pageStart = pageOffsets[pageNum];
+  const pageEnd = pageStart + (cleanPageTexts[pageNum] || '').length;
+
+  // Evaluar solapamiento vertical/horizontal con la página actual
+  const overlapStart = Math.max(globalStart, pageStart);
+  const overlapEnd = Math.min(globalEnd, pageEnd);
+
+  if (overlapStart < overlapEnd) {
+    const localStart = overlapStart - pageStart;
+    const localEnd = overlapEnd - pageStart;
+    return cleanPageTexts[pageNum].substring(localStart, localEnd);
+  }
+
+  return null;
+}
+
+// Busca un fragmento limpio (sin espacios) directamente en los spans de una sola página
+function findCleanFragmentOnPage(pageItem, cleanNeedle) {
+  const spans = pageItem.textDivs && pageItem.textDivs.length
+    ? pageItem.textDivs
+    : Array.from((pageItem.textLayer && pageItem.textLayer.querySelectorAll('span')) || []);
+
+  const globalCharMap = [];
+  let nonSpaceText = '';
+
+  for (const span of spans) {
+    const text = span.textContent || '';
+    for (let i = 0; i < text.length; i++) {
+      const char = text[i];
+      if (/\s/.test(char)) continue;
+      nonSpaceText += char;
+      globalCharMap.push(span);
+    }
+  }
+
+  const idx = nonSpaceText.toLowerCase().indexOf(cleanNeedle.toLowerCase());
+  const matchedSpans = [];
+  if (idx !== -1) {
+    for (let i = idx; i < idx + cleanNeedle.length; i++) {
+      const span = globalCharMap[i];
+      if (span && !matchedSpans.includes(span)) {
+        matchedSpans.push(span);
+      }
+    }
+  }
+  return matchedSpans;
 }
 
 function makeHighlight(box) {

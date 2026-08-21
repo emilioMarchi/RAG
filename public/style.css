@@ -893,7 +893,81 @@ body {
   font-style: italic;
 }
 
+/* Contenido rico dentro de la burbuja (markdown ligero del asistente) */
+.chat-bubble p { margin: 0 0 8px; }
+.chat-bubble p:last-child { margin-bottom: 0; }
+.chat-bubble p.chat-heading {
+  font-weight: 700;
+  color: var(--text-0);
+  margin: 12px 0 4px;
+}
+.chat-bubble ul, .chat-bubble ol { margin: 4px 0 8px; padding-left: 22px; }
+.chat-bubble li { margin: 2px 0; }
+/* La numeración/letra original va como texto literal en el <li>; el navegador
+   no debe re-numerar (evita que un "4." se muestre como "1."). */
+.chat-bubble ol, .chat-bubble ol.alpha { list-style: none; }
+.chat-bubble h3, .chat-bubble h4, .chat-bubble h5, .chat-bubble h6 {
+  margin: 10px 0 4px;
+  line-height: 1.3;
+}
+.chat-bubble h3 { font-size: 15px; }
+.chat-bubble h4 { font-size: 14px; }
+.chat-bubble h5, .chat-bubble h6 { font-size: 13.5px; }
+.chat-bubble hr { border: none; border-top: 1px solid var(--border); margin: 10px 0; }
+.chat-bubble code {
+  background: rgba(0, 0, 0, .18);
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-family: Consolas, 'Courier New', monospace;
+  word-break: break-word;
+}
+.chat-bubble pre {
+  background: #161b22;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  overflow-x: auto;
+  white-space: pre;
+  margin: 8px 0;
+  font-size: 12px;
+  line-height: 1.55;
+}
+.chat-bubble pre code {
+  background: transparent;
+  padding: 0;
+  border-radius: 0;
+  font-size: inherit;
+  display: block;
+}
+.chat-bubble pre code.hljs {
+  background: transparent;
+}
+.chat-bubble table {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  border-collapse: collapse;
+  margin: 8px 0;
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+.chat-bubble th, .chat-bubble td {
+  border: 1px solid var(--border);
+  padding: 6px 10px;
+  text-align: left;
+}
+.chat-bubble th {
+  background: rgba(255, 255, 255, .06);
+  font-weight: 600;
+}
+.chat-bubble tr:nth-child(even) td {
+  background: rgba(255, 255, 255, .03);
+}
+.chat-bubble .citation-chip { vertical-align: baseline; }
+
 /* Fases del pipeline: barra fija arriba del chat, fuera del flujo de mensajes */
+.chat-status.hide { display: none !important; }
 .chat-status {
   flex: none;
   display: flex;
@@ -1423,6 +1497,16 @@ body {
 }
 .viewer-pdf .pdf-page { position: relative; margin: 0 auto 16px; width: fit-content; background: #fff; box-shadow: 0 2px 14px rgba(0,0,0,.5); border: 2px solid transparent; }
 .viewer-pdf .pdf-page canvas { display: block; }
+.pdf-page-loader {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  color: var(--text-1);
+  font-family: inherit;
+  font-size: 13px;
+  pointer-events: none;
+}
 .textLayer {
   position: absolute;
   inset: 0;
@@ -1444,6 +1528,26 @@ body {
   border: 2px solid var(--yellow);
   pointer-events: none;
   animation: viewerPulse 1.5s ease-out 2;
+}
+.pdf-search-hl {
+  position: absolute;
+  background: rgba(79, 142, 247, 0.30);
+  border: 1px solid var(--accent);
+  pointer-events: none;
+  z-index: 5;
+}
+.pdf-search-hl-active {
+  background: rgba(239, 68, 68, 0.45) !important;
+  border: 2px solid var(--red) !important;
+  z-index: 6;
+}
+.viewer-search-match-line {
+  background: rgba(79, 142, 247, 0.15) !important;
+  border-left: 3px solid var(--accent) !important;
+}
+.viewer-search-match-line-active {
+  background: rgba(239, 68, 68, 0.20) !important;
+  border-left: 3px solid var(--red) !important;
 }
 @keyframes viewerPulse {
   0%   { box-shadow: 0 0 0 0 rgba(245,158,11,.6); }

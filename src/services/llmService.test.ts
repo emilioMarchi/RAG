@@ -17,7 +17,7 @@ vi.mock('../config/env.js', () => ({
   env: { LLM_API_URL: 'http://test', LLM_API_KEY: 'key', LLM_MODEL: 'test-model', LLM_BACKUP_MODEL: 'backup-model' }
 }))
 
-const { LLMService } = await import('./llmService.js')
+const { LLMService, splitByFacets } = await import('./llmService.js')
 
 describe('LLMService', () => {
   let llm
@@ -78,6 +78,72 @@ describe('LLMService', () => {
     const serverError = new Error('500 Internal Server Error')
     mockCreate.mockRejectedValue(serverError)
     await expect(llm.enrichChunk('d', 's', 'c')).rejects.toThrow('500 Internal Server Error')
+    expect(mockCreate).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('splitByFacets', () => {
+  it('splits enumerated facets joined by commas and "o"', () => {
+    const result = splitByFacets(
+      'artículos que hablen sobre sentencias, penas carcelarias o valores monetarios de la Ley 25.326'
+    )
+    expect(result).toEqual([
+      'sentencias',
+      'penas carcelarias',
+      'valores monetarios de la Ley 25.326',
+    ])
+  })
+
+  it('splits facets joined by "y" and "; "', () => {
+    expect(splitByFacets('datos personales y datos sensibles; habeas data')).toEqual([
+      'datos personales',
+      'datos sensibles',
+      'habeas data',
+    ])
+  })
+
+  it('splits "y/o" alternatives', () => {
+    expect(splitByFacets('multas y/o sanciones')).toEqual(['multas', 'sanciones'])
+  })
+
+  it('returns null for an atomic query', () => {
+    expect(splitByFacets('articulo 1')).toBeNull()
+    expect(splitByFacets('')).toBeNull()
+    expect(splitByFacets('a, b')).toBeNull()
+  })
+
+  it('caps the number of sub-queries', () => {
+    expect(splitByFacets('primera faceta, segunda faceta, tercera faceta, cuarta faceta', 3)).toEqual([
+      'primera faceta',
+      'segunda faceta',
+      'tercera faceta',
+    ])
+  })
+})
+
+describe('LLMService.decomposeQuery', () => {
+  let llm
+  beforeEach(() => {
+    vi.clearAllMocks()
+    llm = new LLMService()
+  })
+
+  it('uses deterministic facet split and skips the LLM for enumerated queries', async () => {
+    const res = await llm.decomposeQuery(
+      'artículos que hablen sobre sentencias, penas carcelarias o valores monetarios de la Ley 25.326'
+    )
+    expect(res).toEqual(['sentencias', 'penas carcelarias', 'valores monetarios de la Ley 25.326'])
+    expect(mockCreate).not.toHaveBeenCalled()
+  })
+
+  it('falls back to the LLM when the query has no reliable enumeration signal', async () => {
+    mockCreate.mockResolvedValue({
+      choices: [{ message: { content: JSON.stringify({ sub_queries: ['obligaciones del empleador'] }) } }],
+    })
+    const res = await llm.decomposeQuery(
+      '¿qué obligaciones tiene el empleador además de pagar el sueldo?'
+    )
+    expect(res).toEqual(['obligaciones del empleador'])
     expect(mockCreate).toHaveBeenCalledTimes(1)
   })
 })

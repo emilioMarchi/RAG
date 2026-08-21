@@ -9,9 +9,12 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link href="https://fonts.googleapis.com/css2?family=Inter:ital,wght@0,300;0,400;0,500;0,600;0,700;0,800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="https://unpkg.com/vis-network/styles/vis-network.min.css" />
+  <link rel="stylesheet" href="https://unpkg.com/@highlightjs/cdn-assets@11.9.0/styles/github-dark.min.css" />
   <link rel="stylesheet" href="style.css" />
   <script src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
   <script src="https://unpkg.com/pdfjs-dist@2.16.105/build/pdf.min.js"></script>
+  <script src="https://unpkg.com/dompurify/dist/purify.min.js"></script>
+  <script src="https://unpkg.com/@highlightjs/cdn-assets@11.9.0/highlight.min.js"></script>
 </head>
 <body>
 
@@ -46,7 +49,9 @@
         <label class="upload-strategy">
           <span>Estrategia de ingesta</span>
           <select id="ingest-strategy">
+            <option value="auto">Automática</option>
             <option value="generic">Genérica (multipropósito)</option>
+            <option value="legal">Normativa / Legal</option>
           </select>
         </label>
         <button class="btn-upload" id="btn-pick-file">Seleccionar archivo</button>
@@ -168,7 +173,7 @@
 
       <!-- ── Chat View ────────────────────────────────────────── -->
       <div class="tab-content" id="tab-chat">
-        <div class="chat-status" id="chat-status" hidden></div>
+        <div class="chat-status hide" id="chat-status"></div>
         <div class="chat-messages" id="chat-messages">
           <div class="chat-welcome">
             <div class="chat-welcome-icon">⬡</div>
@@ -240,6 +245,12 @@
       <div class="viewer-header">
         <span class="viewer-title" id="viewer-title">Documento</span>
         <div class="viewer-header-actions">
+          <div class="viewer-search-container" id="viewer-pdf-search-box" style="display:none; align-items: center; gap: 6px; margin-right: 12px;">
+            <input type="text" id="viewer-search-input" placeholder="Buscar en documento..." class="viewer-search-input" style="background: var(--bg-3); border: 1px solid var(--border); color: var(--text-0); padding: 4px 8px; border-radius: 4px; font-size: 13px; outline: none; width: 150px;">
+            <button class="viewer-btn" id="viewer-search-prev" title="Anterior" style="padding: 4px 8px; display: inline-flex; align-items: center; justify-content: center; height: 26px; width: 26px;">↑</button>
+            <button class="viewer-btn" id="viewer-search-next" title="Siguiente" style="padding: 4px 8px; display: inline-flex; align-items: center; justify-content: center; height: 26px; width: 26px;">↓</button>
+            <span id="viewer-search-results" style="font-size: 12px; color: var(--text-1); min-width: 45px; text-align: center;">0/0</span>
+          </div>
           <button class="viewer-btn" id="viewer-search-sel" title="Buscar selección en el grafo" style="display:none">🔍 Buscar selección</button>
           <button class="viewer-close" id="viewer-close" title="Cerrar">✕</button>
         </div>

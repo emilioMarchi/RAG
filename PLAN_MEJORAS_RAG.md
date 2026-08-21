@@ -1,72 +1,82 @@
-Para un sistema RAG multicapa aplicado a jurisprudencia y documentos legales en español, la elección del modelo de embeddings (o de reranking) es crítica: el lenguaje jurídico es extenso, denso, lleno de jerga formal, referencias cruzadas y matices sutiles donde cambiar una palabra altera todo el sentido.
+¿Cómo adaptar PDF.js a tu RAG para ubicar y subrayar texto?
+Aunque el video solo muestra el uso básico del visor, PDF.js es justamente la librería clave para lograr interactividad en web. Para lograr ubicar fragmentos o palabras clave provenientes de tu RAG y subrayarlos en tiempo real, existen dos enfoques principales:
 
-Dado que buscas mantener el control total del pipeline y ejecutar módulos locales o customizables, la arquitectura óptima para cada capa o etapa del RAG se compone de la siguiente manera:
+1. Usar las capas nativas de PDF.js (TextLayer y AnnotationLayer)
+PDF.js renderiza los documentos dibujando los elementos visuales en un <canvas> y superponiendo una capa de texto transparente (TextLayer) para permitir la selección y búsqueda.
 
-Arquitectura de Embeddings por Capa / Etapa
-En un RAG multicapa o jerárquico para jurisprudencia, se suelen dividir los documentos en diferentes niveles de abstracción (por ejemplo: Capa 1: Resúmenes/Sumarios/Fallas; Capa 2: Fragmentos densos del cuerpo de la sentencia; Capa 3: Búsqueda Léxica/Reranking).
+Uso del PDFFindController: PDF.js cuenta con un controlador interno de búsqueda. Puedes enviarle los fragmentos o palabras clave retornados por tu RAG para que ubique las Coincidencias en el documento automáticamente.
 
-1. Capa de Resúmenes / Sumarios / Preguntas Frecuentes (Indexación de Alto Nivel)
-Objetivo: Filtrar o enrutar rápido la doctrina o la rama del derecho (ej. laboral, civil, penal) antes de ir a los textos largos.
+Coordenadas de Bounding Boxes: Si tu backend RAG (o la herramienta de extracción del PDF) te retorna las coordenadas exactas de las palabras o fragmentos (x, y, ancho, alto y número de página), puedes dibujar directamente rectángulos semitransparentes sobre la capa de anotaciones o el lienzo canvas para simular el subrayado marcador.
 
-Modelo recomendado: hiems/BERTa-MiniLM-L6-v2-es o paraphrase-multilingual-MiniLM-L12-v2
+2. Librerías complementarias construidas sobre PDF.js
+Integrar el visor de PDF.js crudo e implementar la manipulación del DOM manualmente puede ser complejo. Por ello, en el ecosistema RAG se suelen integrar wrappers o bibliotecas que extienden PDF.js:
 
-Por qué: Son extremadamente rápidos y ligeros (dimensiones de 384). Funcionan perfecto para fragmentos cortos (hasta 256–512 tokens) y te permiten hacer una primera filtración semántica muy veloz en CPU sin latencia alta.
+react-pdf-highlighter (o similar si usas React): Permite pasar coordenadas/rangos de texto y renderizar resúmenes o subrayados interactivos (highlights) sobre las páginas del PDF automáticamente.
 
-2. Capa Principal de Recuperación Semántica (Cuerpo de Sentencias / Artículos)
-Objetivo: Capturar el significado profundo de fragmentos complejos, considerandos, antecedentes y fundamentos jurídicos.
+PDF.js Express / PSPDFKit: Alternativas comerciales (con capas gratuitas) construidas sobre la base de PDF.js que simplifican la API para agregar/eliminar anotaciones, marcas de texto y resaltados programáticamente.
 
-Modelos recomendados:
+Mapeo típico entre RAG y el Visor de PDF
+Ingesta y Parsing (Backend): Cuando procesas el PDF para tu base de vectores, guarda no solo el texto del chunk, sino también los metadatos de ubicación: número de página (page_number) y, de ser posible, los bounding boxes o índice de caracteres.
 
-BAAI/bge-m3 (La recomendación estrella open-source)
+Consulta RAG: El usuario consulta y el RAG devuelve la respuesta junto con las citas o chunks relevantes y sus metadatos de posición.
 
-Dimensiones: 1024.
+Renderizado en el Frontend:
 
-Ventajas clave para RAG legal:
+Cargas el PDF usando PDF.js.
 
-Contexto extenso (8192 tokens): Te permite indexar párrafos o considerandos largos sin truncar arbitrariamente los argumentos jurídicos.
+Navegas automáticamente a la página especificada en el chunk (pdfViewer.currentPageNumber = page).
 
-Búsqueda Híbrida Nativa: bge-m3 genera simultáneamente dense embeddings (similitud semántica), sparse embeddings (tipo BM25/keywords) y vectores multivector. Esto es ideal para jurisprudencia, donde a veces se busca por concepto (semántico) y a veces por una ley, artículo o número de causa exacto (léxico).
+Ejecutas la búsqueda con el texto del fragmento o aplicas una capa de resaltado CSS/Canvas en las coordenadas indicadas.
 
-intfloat/multilingual-e5-large o multilingual-e5-base
 
-Ventajas: Excelente rendimiento para recuperación de información en español. Requiere usar prefijos en las consultas (query: ... y passage: ...), lo que optimiza la asimetría entre una pregunta corta del usuario y un fragmento de sentencia largo.
+Estrategia Recomendada: Renderizado Integrado en el Frontend
 
-3. Capa de Reranking / Reordenamiento (Paso Crítico en Jurisprudencia)
-En el ámbito legal, un buscador vectorial por sí solo suele traer textos que "suenan parecido" pero que dicen lo opuesto (ej. declarar procedente vs improcedente un recurso). Por eso, pasar los top-N resultados (ej. top 20) por un Cross-Encoder / Reranker es casi obligatorio.
+Para mantener el control total que buscas en tus módulos RAG sin reinventar el renderizado completo de PDFs, la combinación ideal es usar PDF.js en el frontend conectado con los metadatos de ubicación que extraiga tu backend.
 
-Objetivo: Reevaluar la consulta junto con cada fragmento recuperado para reordenar por relevancia real.
+### Opción 1: Desarrollo propio ligero con PDF.js (Control Total)
+Si quieres controlar el 100% de la interfaz sin frameworks pesados de terceros:
+* **Backend (Python / Node):** Al segmentar el PDF para las incrustaciones (embeddings), utiliza librerías como PyMuPDF (fitz) o pdfplumber. Estas no solo extraen el texto del chunk, sino también las coordenadas ($x, y, w, h$) y el número de página.
+* **Metadata del Chunk:** Almacena en la base de vectores la estructura del resultado:
+```json
+{
+  "text": "fragmento recuperado...",
+  "page": 3,
+  "bbox": [x0, y0, x1, y1]
+}
+```
+* **Frontend:** Implementa PDF.js y utiliza su TextLayer. Cuando el usuario haga clic en una cita o fuente de la respuesta del RAG:
+  1. Haces salto de página con `pdfViewer.currentPageNumber = metadata.page`.
+  2. Dibujas un div de resalte con CSS sobre la capa de texto usando las coordenadas bbox convertidas a la escala actual de la página.
 
-Modelos recomendados:
+### Opción 2: Usar Wrappers Abiertos (Desarrollo Rápido)
+Si usas React o Vue en tu panel de consulta, existen componentes listos basados en PDF.js diseñados específicamente para casos de uso estilo RAG:
+* **react-pdf-highlighter:** Biblioteca open-source pensada para resaltar pasajes de texto a partir de rangos de coordenadas o búsquedas exactas. Soporta marcas persistentes y eventos de clic sobre los fragmentos resaltados.
+* **pdfjs-dist + mark.js:** Si prefieres Javascript nativo o no tienes coordenadas exactas (solo el texto del fragmento), puedes usar mark.js directamente sobre el DOM renderizado por la TextLayer de PDF.js para subrayar las coincidencias del texto de forma dinámica.
 
-BAAI/bge-reranker-large o BAAI/bge-reranker-v2-m3
+### Opción 3: Lectores interactivos listos (Plug & Play)
+Si buscas una solución con interfaz preconstruida para integrar vía iframe o componente web:
+* **PDF.js Express (Free Tier):** Incluye APIs nativas para añadir marcas de texto (Annotations) mediante código con una línea de comandos tipo `annotManager.addAnnotation(...)`.
 
-unicamp-dl/mt5-base-mmarco-spanish-cross-encoder
+---
 
-Cómo actúa: A diferencia del embedding (que compara vectores separados), el Reranker procesa la pregunta y el texto juntos en el modelo de atención, detectando si la jurisprudencia realmente responde al caso planteado.
+## Plan de Implementación de Mejoras en Interfaz Web
 
-Estrategia de Implementación Recomendada para RAG Legal
-Si estás armando el pipeline customizado, la combinación ideal en flujo de trabajo es:
+Para optimizar el visor de documentos actual ([viewer.js](file:///D:/Emi/apps/RAG/public/viewer.js)), se estructuran las mejoras en tres fases de implementación consecutivas:
 
-[Consulta del Usuario]
-       │
-       ▼
-┌─────────────────────────────────────────────────────────────┐
-│ 1. Búsqueda Híbrida (Dense + Sparse)                        │
-│    - Denso: BAAI/bge-m3 (Semantic search)                   │
-│    - Léxico: BM25 / Qdrant Sparse / Elasticsearch           │
-└──────────────────────────────┬──────────────────────────────┘
-                               │ (Trae los Top-30 a Top-50)
-                               ▼
-┌─────────────────────────────────────────────────────────────┐
-│ 2. Capa de Reordenamiento (Reranking)                       │
-│    - BAAI/bge-reranker-v2-m3                                │
-└──────────────────────────────┬──────────────────────────────┘
-                               │ (Filtra a los mejores Top-5)
-                               ▼
-┌─────────────────────────────────────────────────────────────┐
-│ 3. Generación (LLM) con Contexto Legal Ajustado             │
-└─────────────────────────────────────────────────────────────┘
-Consejos prácticos para Jurisprudencia:
-Atención al Chunkeado (Chunking): No cortes sentencias por número fijo de caracteres. Divide por estructura formal (ej. Vistos, Considerando, Resuelvo, o por párrafos/artículos).
+### Fase 1: Renderizado Perezoso (Lazy Loading) de Páginas PDF
+**Objetivo:** Evitar renderizar decenas de páginas concurrentemente en canvas, mejorando el rendimiento y uso de memoria en documentos grandes.
+1. **Creación del esqueleto virtual:** Modificar el bucle de renderizado en `renderPDF` para crear los contenedores `.pdf-page` con su tamaño correcto (usando el viewport de la página sin renderizar el canvas inmediatamente).
+2. **Uso de IntersectionObserver:** Configurar un observador de intersección que detecte cuándo un contenedor `.pdf-page` entra o está cerca de entrar en el área visible.
+3. **Renderizado bajo demanda:** Al activarse el observador para una página, ejecutar el renderizado del canvas (`page.render(...)`) y la construcción de la `textLayer` e inyección de resaltados (`pdf-hl`).
 
-Metadata enriquecida: Almacena junto con los vectores campos de metadatos como: Tribunal, Fecha, Fuero, Tipo de Recurso y Resultado (Hizo lugar / Rechazó). Esto te permite aplicar filtros duros en la base vectorial antes de calcular la distancia semántica.
+### Fase 2: Búsqueda Semántica desde Selección de Texto en PDF
+**Objetivo:** Permitir que los usuarios seleccionen cualquier texto dentro del PDF y puedan ejecutar búsquedas semánticas directas.
+1. **Delegación de eventos mouseup:** Escuchar el evento `mouseup` en el contenedor principal `#viewer-pdf`.
+2. **Detección de selección:** Usar `window.getSelection()` para obtener el texto seleccionado de la `textLayer` del PDF.
+3. **Menú contextual flotante:** Mostrar el menú `#viewer-menu` en la posición del cursor de la misma forma que se hace en la vista de texto normal.
+
+### Fase 3: Buscador Interno de Texto
+**Objetivo:** Facilitar la navegación manual de términos exactos dentro del documento visualizado.
+1. **Interfaz de búsqueda:** Añadir un input de búsqueda y botones de navegación de ocurrencias (anterior/siguiente) en la barra de herramientas del visor.
+2. **Integración con PDFFindController:** Inicializar el controlador de búsqueda nativo de PDF.js.
+3. **Resaltado y navegación:** Conectar el input al controlador de búsqueda para resaltar los términos y desplazar la vista automáticamente a la ocurrencia seleccionada.

@@ -7,7 +7,7 @@
 
 // ─── Refuerzos para el visor ─────────────────────────────────────────────
 const viewerEl   = document.getElementById('doc-viewer');
-const viewerTitle= document.getElementById('viewer-title');
+const viewerTitle = document.getElementById('viewer-title');
 const viewerTarget=document.getElementById('viewer-target');
 const viewerScroll=document.getElementById('viewer-scroll');
 const viewerPdf  = document.getElementById('viewer-pdf');
@@ -17,9 +17,25 @@ const viewerMenu = document.getElementById('viewer-menu');
 const viewerMenuSearch = document.getElementById('viewer-menu-search');
 const btnSearchSel = document.getElementById('viewer-search-sel');
 
+// Elementos del buscador interno
+const searchBoxEl = document.getElementById('viewer-pdf-search-box');
+const searchInputEl = document.getElementById('viewer-search-input');
+const searchPrevEl = document.getElementById('viewer-search-prev');
+const searchNextEl = document.getElementById('viewer-search-next');
+const searchResultsEl = document.getElementById('viewer-search-results');
+
 let lastDocInfo = null;   // { docId, mimeType, title }
 let selectionText = null; // texto seleccionado dentro del visor
 let lastSelectionMenuSelection = null;
+
+// Estado del buscador interno
+let currentSearchQuery = '';
+let searchResults = []; // [{ page, lineIndex, spanIndex, textNodeIndex, matchIndex, ... }]
+let activeSearchIndex = -1;
+let pdfPagesText = []; // cache de textos de páginas del pdf { pageNumber -> string }
+let docViewerPdfInstance = null; // Referencia al objeto pdfjs actual
+let docViewerRenderedItems = []; // Referencia al array rendered de páginas
+let rawTextLines = []; // Para búsqueda en archivos de texto plano
 
 function api(path, opts = {}) {
   return fetch((window.location.origin || '') + path, opts).then(async res => {
@@ -50,6 +66,18 @@ window.openDocViewer = async function (docId, location, mimeType, title, fragmen
   viewerTarget.textContent = label ? `Fragmento → ${label}` : 'Documento completo';
   viewerEl.style.display = 'flex';
 
+  // Reiniciar buscador interno
+  searchInputEl.value = '';
+  searchResults = [];
+  activeSearchIndex = -1;
+  currentSearchQuery = '';
+  searchResultsEl.textContent = '0/0';
+  pdfPagesText = [];
+  docViewerPdfInstance = null;
+  docViewerRenderedItems = [];
+  rawTextLines = [];
+  searchBoxEl.style.display = 'flex';
+
   // Limpiar contenedores y preparar el modo según tipo de archivo
   viewerPdf.innerHTML = '';
   viewerText.innerHTML = '';
@@ -72,9 +100,16 @@ function closeDocViewer() {
   viewerPdf.innerHTML = '';
   viewerText.innerHTML = '';
   hideMenu();
+  if (pdfIntersectionObserver) {
+    pdfIntersectionObserver.disconnect();
+    pdfIntersectionObserver = null;
+  }
+  searchBoxEl.style.display = 'none';
+  clearSearchHighlights();
 }
 
 // ─── Visor PDF (pdf.js) ──────────────────────────────────────────────────
+let pdfIntersectionObserver = null;
 let pdfWorkerSet = false;
 function ensurePdfWorker() {
   if (pdfWorkerSet) return;
@@ -86,20 +121,45 @@ function ensurePdfWorker() {
 
 async function renderPDF(docId, location, fragmentText) {
   ensurePdfWorker();
+  
+  if (pdfIntersectionObserver) {
+    pdfIntersectionObserver.disconnect();
+    pdfIntersectionObserver = null;
+  }
+
   const res = await fetch(`/api/documents/${docId}/file`);
   if (!res.ok) throw new Error('No se pudo cargar el archivo PDF');
   const data = await res.arrayBuffer();
   const pdf = await window.pdfjsLib.getDocument({ data }).promise;
 
   const targetPage = Math.max(1, Math.min(location?.pageNumber || 1, pdf.numPages));
-
   const maxPages = Math.min(pdf.numPages, 80);
   let targetPageNo = targetPage;
 
-  // Recolectamos primero todas las páginas (wrapper + capa de texto) y las
-  // AGREGAMOS al DOM antes de medir posiciones: getBoundingClientRect() devuelve
-  // ceros sobre elementos que aún no están en el documento.
   const rendered = [];
+
+  // Configurar el IntersectionObserver para cargar las páginas perezosamente
+  pdfIntersectionObserver = new IntersectionObserver((entries) => {
+    entries.forEach(entry => {
+      if (entry.isIntersecting) {
+        const pageNum = Number(entry.target.dataset.page);
+        const item = rendered.find(r => r.n === pageNum);
+        if (item && !item.rendered) {
+          renderPageContent(item, pdf, location, fragmentText);
+        }
+      }
+    });
+  }, {
+    root: viewerScroll,
+    rootMargin: '300px 0px', // Pre-cargar páginas con 300px de margen vertical
+    threshold: 0.01
+  });
+
+  // Guardar referencias globales del visor
+  docViewerPdfInstance = pdf;
+  docViewerRenderedItems = rendered;
+
+  // Generamos los esqueletos (wrappers vacíos) de las páginas con las dimensiones reales
   for (let n = 1; n <= maxPages; n++) {
     const page = await pdf.getPage(n);
     const base = page.getViewport({ scale: 1 });
@@ -109,18 +169,74 @@ async function renderPDF(docId, location, fragmentText) {
     const wrapper = document.createElement('div');
     wrapper.className = 'pdf-page';
     wrapper.dataset.page = n;
+    wrapper.style.width = Math.floor(viewport.width) + 'px';
+    wrapper.style.height = Math.floor(viewport.height) + 'px';
+
+    const loader = document.createElement('div');
+    loader.className = 'pdf-page-loader';
+    loader.textContent = `Cargando página ${n}...`;
+    wrapper.appendChild(loader);
+
+    viewerPdf.appendChild(wrapper);
+
+    rendered.push({
+      n,
+      wrapper,
+      viewport,
+      loader,
+      rendered: false
+    });
+
+    // Cargar asíncronamente el texto plano para el buscador
+    page.getTextContent().then(tc => {
+      pdfPagesText[n] = tc.items.map(item => item.str).join(' ');
+    }).catch(() => {});
+
+    pdfIntersectionObserver.observe(wrapper);
+  }
+
+  // Guiar el desplazamiento inicial a la página objetivo
+  let pageToScroll = targetPageNo;
+
+  // Hacer scroll a la página seleccionada/relevante
+  const scrollTo = Array.from(viewerPdf.querySelectorAll('.pdf-page'))
+    .find(p => Number(p.dataset.page) === pageToScroll);
+  if (scrollTo) {
+    // Retrasar levemente para asegurar que el scroll se aplique después de montar
+    setTimeout(() => {
+      scrollTo.scrollIntoView({ block: 'start', behavior: 'smooth' });
+    }, 100);
+  }
+}
+
+async function renderPageContent(item, pdf, location, fragmentText) {
+  if (item.rendered) return;
+  item.rendered = true;
+
+  try {
+    const page = await pdf.getPage(item.n);
+    const viewport = item.viewport;
+    const wrapper = item.wrapper;
+
+    // Crear y configurar canvas
     const canvas = document.createElement('canvas');
     canvas.width = Math.floor(viewport.width);
     canvas.height = Math.floor(viewport.height);
     canvas.style.width = Math.floor(viewport.width) + 'px';
     canvas.style.height = Math.floor(viewport.height) + 'px';
     const ctx = canvas.getContext('2d');
-    // Render directo con el viewport escalado (sin transform): texto negro nítido.
-    await page.render({ canvasContext: ctx, viewport, transform: undefined }).promise;
+
+    // Remover loader
+    if (item.loader && item.loader.parentNode) {
+      wrapper.removeChild(item.loader);
+    }
+
     wrapper.appendChild(canvas);
 
-    // Capa de texto superpuesta al canvas para que el texto del PDF sea
-    // seleccionable / buscable (el canvas es solo una imagen rasterizada).
+    // Renderizar página en el canvas
+    await page.render({ canvasContext: ctx, viewport, transform: undefined }).promise;
+
+    // Crear capa de texto
     const tc = await page.getTextContent();
     const textLayer = document.createElement('div');
     textLayer.className = 'textLayer';
@@ -138,85 +254,28 @@ async function renderPDF(docId, location, fragmentText) {
       });
       await tlTask.promise;
     } catch (tlErr) {
-      // Si la capa de texto falla, el visor sigue funcionando solo con canvas.
+      // Ignorar fallos de capa de texto
     }
     wrapper.appendChild(textLayer);
-    viewerPdf.appendChild(wrapper);
-    rendered.push({ n, wrapper, viewport, textLayer, textDivs });
-  }
 
-  // ── Resaltado ──────────────────────────────────────────────────────────
-  // Prioridad: los bounding boxes guardados son DETERMINISTAS (derivados por offset
-  // del chunk en el texto original durante la ingesta), así que coincide exactamente
-  // con el texto mostrado en el grafo. El matching por capa de texto solo se usa como
-  // respaldo si el chunk no trae coordenadas (p. ej. docs ingeridos antes de este cambio).
-  let highlighted = false;
-
-  // 1) Coordenadas normalizadas guardadas por página (boxesByPage) — exactas.
-  const byPage = Array.isArray(location?.boxesByPage) ? location.boxesByPage : [];
-  if (byPage.length > 0) {
-    const pageToWrap = new Map(rendered.map(r => [r.n, r]));
-    for (const pg of byPage) {
-      const item = pageToWrap.get(pg.pageNumber);
-      if (!item || !Array.isArray(pg.boxes)) continue;
-      for (const b of pg.boxes) {
-        if (!b || b.x == null || b.y == null || b.width == null || b.height == null) continue;
-        item.wrapper.appendChild(makeHighlight({
-          left: b.x * item.viewport.width,
-          top: b.y * item.viewport.height,
-          width: b.width * item.viewport.width,
-          height: b.height * item.viewport.height,
-        }));
+    // ── Resaltados para esta página específica (Búsqueda de fragmento en texto) ──
+    if (fragmentText) {
+      const pageItem = { n: item.n, wrapper, viewport, textLayer, textDivs };
+      const matchedLinePerPage = findFragmentAcrossPages([pageItem], fragmentText);
+      const spans = matchedLinePerPage.get(item.n) || [];
+      if (spans.length) {
+        const boxes = spansToBoxes(spans, textLayer);
+        for (const box of boxes) {
+          wrapper.appendChild(makeHighlight(box));
+        }
+        wrapper.style.borderColor = 'var(--accent)';
       }
-      item.wrapper.style.borderColor = 'var(--accent)';
-      highlighted = true;
     }
-  }
-
-  // 2) Respaldo antiguo: boundingBoxes de una sola página (docs previos a boxesByPage).
-  const targetBoxes = Array.isArray(location?.boundingBoxes) ? location.boundingBoxes.filter(b => b) : [];
-  if (!highlighted && targetBoxes.length) {
-    const item = rendered.find(r => r.n === targetPageNo);
-    if (item) {
-      for (const b of targetBoxes) {
-        if (!b || b.x == null || b.y == null || b.width == null || b.height == null) continue;
-        item.wrapper.appendChild(makeHighlight({
-          left: b.x * item.viewport.width,
-          top: b.y * item.viewport.height,
-          width: b.width * item.viewport.width,
-          height: b.height * item.viewport.height,
-        }));
-      }
-      item.wrapper.style.borderColor = 'var(--accent)';
-      highlighted = true;
+  } catch (err) {
+    console.error(`Error renderizando página ${item.n}:`, err);
+    if (item.loader) {
+      item.loader.textContent = `Error al cargar la página ${item.n}`;
     }
-  }
-
-  // 3) Último respaldo: derivar de los spans de la capa de texto (pixel-perfect).
-  //    Se busca el fragmento a lo largo de TODAS las páginas (puede cruzar límites).
-  if (!highlighted) {
-    const matchedLinePerPage = findFragmentAcrossPages(rendered, fragmentText);
-    for (const { n, wrapper, viewport, textLayer } of rendered) {
-      const spans = matchedLinePerPage.get(n) || [];
-      if (!spans.length) continue;
-      const boxes = spansToBoxes(spans, textLayer);
-      for (const box of boxes) {
-        wrapper.appendChild(makeHighlight(box));
-      }
-      wrapper.style.borderColor = 'var(--accent)';
-      highlighted = true;
-    }
-  }
-
-  // Desplazamos a la primera página que contenga un resaltado; si no hay, a la
-  // página objetivo indicada por el fragmento.
-  const pagesWithHl = Array.from(viewerPdf.querySelectorAll('.pdf-page'))
-    .filter(p => p.querySelector('.pdf-hl'));
-  const scrollTo = pagesWithHl.length
-    ? pagesWithHl[0]
-    : Array.from(viewerPdf.querySelectorAll('.pdf-page')).find(p => Number(p.dataset.page) === targetPageNo);
-  if (scrollTo) {
-    scrollTo.scrollIntoView({ block: 'start', behavior: 'smooth' });
   }
 }
 
@@ -238,63 +297,51 @@ function findFragmentAcrossPages(rendered, fragmentText) {
   const out = new Map();
   if (!rendered || rendered.length === 0) return out;
 
-  const norm = (s) => (s || '').replace(/\s+/g, ' ');
-  const needle = norm((fragmentText || '').trim());
+  // Normalizar eliminando todo tipo de espacios en blanco para evitar problemas
+  // con la división de spans de PDF.js
+  const cleanStr = (s) => (s || '').replace(/\s+/g, '');
+  const needle = cleanStr(fragmentText);
   if (!needle) return out;
 
-  const pageSpans = rendered.map(({ textDivs, textLayer }) => {
+  // 1. Recolectar spans de las páginas y construir el mapa de caracteres a nivel global
+  const globalCharMap = [];
+  let nonSpaceText = '';
+
+  for (const { n, textLayer, textDivs } of rendered) {
     const targets = textDivs && textDivs.length
       ? textDivs
       : Array.from((textLayer && textLayer.querySelectorAll('span')) || []);
-    const normalized = targets.map(d => norm(d.textContent || ''));
-    const offsets = [];
-    let acc = 0;
-    for (const t of normalized) { offsets.push(acc); acc += Math.max(t.length, 1); }
-    return { targets, normalized, offsets, total: acc };
-  });
 
-  // Ruta 1: coincidencia contigua a lo largo de todas las páginas unidas.
-  const globalStarts = [];
-  let globalAcc = 0;
-  for (const p of pageSpans) { globalStarts.push(globalAcc); globalAcc += p.total; }
-  const allText = pageSpans.map(p => p.normalized.join('')).join('');
-  const idx = allText.indexOf(needle);
-
-  if (idx >= 0) {
-    for (let p = 0; p < pageSpans.length; p++) {
-      const ps = pageSpans[p];
-      const pageGlobStart = globalStarts[p];
-      const pageGlobEnd = pageGlobStart + ps.total;
-      if (pageGlobEnd <= idx || pageGlobStart >= idx + needle.length) continue;
-      const spans = [];
-      for (let i = 0; i < ps.normalized.length; i++) {
-        const e = ps.offsets[i] + Math.max(ps.normalized[i].length, 1);
-        const gs = pageGlobStart + ps.offsets[i];
-        const ge = pageGlobStart + e;
-        if (ge > idx && gs < idx + needle.length) spans.push(ps.targets[i]);
+    for (const span of targets) {
+      const text = span.textContent || '';
+      for (let i = 0; i < text.length; i++) {
+        const char = text[i];
+        if (/\s/.test(char)) {
+          // Es un espacio en blanco en el DOM, lo ignoramos para la aguja limpia
+          continue;
+        }
+        nonSpaceText += char;
+        globalCharMap.push({ pageNum: n, span });
       }
-      if (spans.length) out.set(rendered[p].n, spans);
     }
-    if (out.size > 0) return out;
   }
 
-  // Ruta 2: buscar por página cada línea del fragmento (tolerante a cruces de página).
-  const lines = (fragmentText || '').split('\n').map(l => norm(l.trim())).filter(Boolean);
-  if (lines.length === 0) return out;
-
-  for (let p = 0; p < pageSpans.length; p++) {
-    const ps = pageSpans[p];
-    const pageText = ps.normalized.join('');
-    const hit = new Set();
-    for (const line of lines) {
-      const ix = pageText.indexOf(line);
-      if (ix < 0) continue;
-      for (let i = 0; i < ps.normalized.length; i++) {
-        const e = ps.offsets[i] + Math.max(ps.normalized[i].length, 1);
-        if (e > ix && ps.offsets[i] < ix + line.length) hit.add(ps.targets[i]);
+  // 2. Buscar la aguja limpia en el texto plano consolidado libre de espacios
+  const idx = nonSpaceText.toLowerCase().indexOf(needle.toLowerCase());
+  if (idx !== -1) {
+    // 3. Mapear la coincidencia exacta de vuelta a sus spans originales en el DOM
+    for (let i = idx; i < idx + needle.length; i++) {
+      const mapped = globalCharMap[i];
+      if (mapped) {
+        if (!out.has(mapped.pageNum)) {
+          out.set(mapped.pageNum, []);
+        }
+        const list = out.get(mapped.pageNum);
+        if (!list.includes(mapped.span)) {
+          list.push(mapped.span);
+        }
       }
     }
-    if (hit.size) out.set(rendered[p].n, Array.from(hit));
   }
 
   return out;
@@ -344,6 +391,7 @@ async function renderText(docId, location) {
   const text = await res.text();
 
   const lines = text.split('\n');
+  rawTextLines = lines;
   const frag = document.createDocumentFragment();
   const lineEls = [];
 
@@ -385,11 +433,21 @@ function currentSelectionText() {
   const sel = window.getSelection();
   if (!sel || sel.isCollapsed) return '';
   const text = sel.toString().trim();
-  lastSelectionMenuSelection = viewerText.contains(sel.anchorNode) ? text : '';
+  lastSelectionMenuSelection = (viewerText.contains(sel.anchorNode) || viewerPdf.contains(sel.anchorNode)) ? text : '';
   return text;
 }
 
 viewerText.addEventListener('mouseup', (e) => {
+  const text = currentSelectionText();
+  if (text && text.length > 2) {
+    viewerMenu.style.display = 'block';
+    positionMenu(e.clientX, e.clientY);
+  } else {
+    hideMenu();
+  }
+});
+
+viewerPdf.addEventListener('mouseup', (e) => {
   const text = currentSelectionText();
   if (text && text.length > 2) {
     viewerMenu.style.display = 'block';
@@ -423,4 +481,160 @@ btnSearchSel.addEventListener('click', () => {
 
 document.addEventListener('mousedown', (e) => {
   if (viewerMenu && !viewerMenu.contains(e.target)) hideMenu();
+});
+
+// ─── Funciones del Buscador Interno de Documentos ──────────────────────────
+function clearSearchHighlights() {
+  // Limpiar resaltados de PDF
+  document.querySelectorAll('.pdf-search-hl').forEach(el => el.remove());
+  // Limpiar resaltados de Texto/Código
+  document.querySelectorAll('.viewer-search-match-line, .viewer-search-match-line-active').forEach(el => {
+    el.classList.remove('viewer-search-match-line', 'viewer-search-match-line-active');
+  });
+}
+
+function executeSearch(query) {
+  clearSearchHighlights();
+  searchResults = [];
+  activeSearchIndex = -1;
+  searchResultsEl.textContent = '0/0';
+
+  if (!query) return;
+
+  const isPdf = lastDocInfo && lastDocInfo.mimeType.includes('pdf');
+  const q = query.toLowerCase();
+
+  if (isPdf) {
+    if (!docViewerPdfInstance) return;
+    for (let pageNum = 1; pageNum < pdfPagesText.length; pageNum++) {
+      const text = pdfPagesText[pageNum] || '';
+      let idx = text.toLowerCase().indexOf(q);
+      while (idx !== -1) {
+        searchResults.push({
+          type: 'pdf',
+          page: pageNum,
+          index: idx,
+          query: query
+        });
+        idx = text.toLowerCase().indexOf(q, idx + q.length);
+      }
+    }
+  } else {
+    for (let lineIdx = 0; lineIdx < rawTextLines.length; lineIdx++) {
+      const text = rawTextLines[lineIdx] || '';
+      let idx = text.toLowerCase().indexOf(q);
+      while (idx !== -1) {
+        searchResults.push({
+          type: 'text',
+          line: lineIdx + 1,
+          index: idx,
+          query: query
+        });
+        idx = text.toLowerCase().indexOf(q, idx + q.length);
+      }
+    }
+  }
+
+  if (searchResults.length > 0) {
+    activeSearchIndex = 0;
+    navigateToSearchMatch(0);
+  } else {
+    searchResultsEl.textContent = '0/0';
+  }
+}
+
+async function navigateToSearchMatch(idx) {
+  if (searchResults.length === 0 || idx < 0 || idx >= searchResults.length) return;
+
+  clearSearchHighlights();
+  searchResultsEl.textContent = `${idx + 1}/${searchResults.length}`;
+
+  const match = searchResults[idx];
+
+  if (match.type === 'pdf') {
+    if (!docViewerPdfInstance || !docViewerRenderedItems) return;
+    const item = docViewerRenderedItems.find(r => r.n === match.page);
+    if (!item) return;
+
+    // Asegurar que la página esté renderizada
+    if (!item.rendered) {
+      await renderPageContent(item, docViewerPdfInstance, lastDocInfo.location, lastDocInfo.fragmentText);
+    }
+
+    // Scroll a la página
+    item.wrapper.scrollIntoView({ block: 'start', behavior: 'smooth' });
+
+    // Buscar y dibujar coincidencias en el DOM de la capa de texto
+    const textLayer = item.wrapper.querySelector('.textLayer');
+    if (textLayer) {
+      const pageItem = {
+        n: item.n,
+        wrapper: item.wrapper,
+        viewport: item.viewport,
+        textLayer: textLayer,
+        textDivs: Array.from(textLayer.querySelectorAll('span'))
+      };
+
+      const matchedLinePerPage = findFragmentAcrossPages([pageItem], match.query);
+      const spans = matchedLinePerPage.get(item.n) || [];
+      if (spans.length) {
+        const boxes = spansToBoxes(spans, textLayer);
+        let activeHl = null;
+        boxes.forEach((box, bIdx) => {
+          const hl = document.createElement('div');
+          hl.className = 'pdf-search-hl';
+          hl.style.left = box.left + 'px';
+          hl.style.top = box.top + 'px';
+          hl.style.width = box.width + 'px';
+          hl.style.height = box.height + 'px';
+          
+          if (bIdx === 0) {
+            hl.classList.add('pdf-search-hl-active');
+            activeHl = hl;
+          }
+          item.wrapper.appendChild(hl);
+        });
+
+        if (activeHl) {
+          setTimeout(() => {
+            activeHl.scrollIntoView({ block: 'center', behavior: 'smooth' });
+          }, 100);
+        }
+      }
+    }
+  } else {
+    // Modo texto
+    const lineEl = viewerText.querySelector(`.viewer-line[data-line="${match.line}"]`);
+    if (lineEl) {
+      lineEl.classList.add('viewer-search-match-line', 'viewer-search-match-line-active');
+      lineEl.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    }
+  }
+}
+
+// ─── Listeners del Buscador Interno ────────────────────────────────────────
+searchInputEl.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    const query = searchInputEl.value.trim();
+    if (query !== currentSearchQuery) {
+      currentSearchQuery = query;
+      executeSearch(query);
+    } else if (searchResults.length > 0) {
+      activeSearchIndex = (activeSearchIndex + 1) % searchResults.length;
+      navigateToSearchMatch(activeSearchIndex);
+    }
+  }
+});
+
+searchPrevEl.addEventListener('click', () => {
+  if (searchResults.length === 0) return;
+  activeSearchIndex = (activeSearchIndex - 1 + searchResults.length) % searchResults.length;
+  navigateToSearchMatch(activeSearchIndex);
+});
+
+searchNextEl.addEventListener('click', () => {
+  if (searchResults.length === 0) return;
+  activeSearchIndex = (activeSearchIndex + 1) % searchResults.length;
+  navigateToSearchMatch(activeSearchIndex);
 });

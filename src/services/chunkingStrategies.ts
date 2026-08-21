@@ -248,11 +248,29 @@ export interface StrategySplittingOptions {
  * llamada crea su detector (sin estado, barato).
  */
 export function resolveChunkingStrategy(
-  _metadata: ChunkingFileMetadata,
-  _text?: string
+  metadata: ChunkingFileMetadata,
+  text?: string
 ): { strategy: ChunkingStrategy; source: 'manual' | 'detected' | 'heuristic' } {
-  // Estrategia única robusta: genérica multipropósito. Funciona limpio en PDF, DOCX, TXT, MD.
-  return { strategy: new GenericChunkingStrategy(), source: 'manual' };
+  // Explicitas (incluye compatibilidad con el flujo anterior por domain/fileType).
+  const explicitLegal =
+    metadata.chunkingStrategy === 'legal' ||
+    metadata.domain === 'legal' ||
+    metadata.fileType === 'pdf_normativo' ||
+    /ley|norma|decreto|regulaci/i.test(metadata.domain ?? '');
+  const explicitGeneric = metadata.chunkingStrategy === 'generic' || metadata.domain === 'general';
+
+  if (explicitLegal) return { strategy: new LegalNormChunkingStrategy(), source: 'manual' };
+  if (explicitGeneric) return { strategy: new GenericChunkingStrategy(), source: 'manual' };
+
+  // Automática: clasificación por contenido.
+  if (metadata.chunkingStrategy === 'auto' && text) {
+    const detected = new StrategyDetector().detect(text);
+    const strategy = detected.strategy === 'legal' ? new LegalNormChunkingStrategy() : new GenericChunkingStrategy();
+    return { strategy, source: 'detected' };
+  }
+
+  // Compatibilidad con llamadas existentes (sin chunkingStrategy): heurística clásica.
+  return { strategy: new ChunkingStrategySelector().getStrategy(metadata), source: 'heuristic' };
 }
 
 /**

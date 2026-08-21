@@ -41,6 +41,31 @@ const client = new OpenAI({
 
 interface ModelPref { model?: string }
 
+/**
+ * Descomposición determinista por facetas: si la consulta enumERA conceptos
+ * (",", ";", "y", "o", "y/o") los separa en sub-consultas atómicas sin gastar
+ * una llamada LLM (cara y lenta). Cada faceta = una búsqueda vectorial, y la
+ * fusión RRF se encarga de combinar los rankings. Devuelve null si la consulta
+ * es atómica (una sola intención) o no ofrece señal de enumeración confiable.
+ */
+export function splitByFacets(query: string, maxSubQueries = 5): string[] | null {
+  if (!query) return null;
+  const parts = query
+    .split(/\s*(?:,\s*|;\s*|\by\s|\by\/o\s|\bo\s)/i)
+    .map((p) => p.replace(/^\s+|\s+$/g, ''))
+    // Quita muletillas iniciales del LLM/agente ("artículos que hablen sobre …").
+    .map((p) =>
+      p.replace(
+        /^(?:art[ií]culos?\s+que\s+hablen\s+(?:sobre|de)\s+|que\s+hablen\s+(?:sobre|de)\s+|sobre\s+|acerca\s+de\s+|b[uú]squeda\s+de\s+|buscar\s+|info\s+(?:sobre\s+)?)/i,
+        ''
+      )
+    )
+    .map((p) => p.replace(/^\s+|\s+$/g, ''))
+    .filter((p) => p.length >= 4);
+  if (parts.length < 2) return null;
+  return parts.slice(0, maxSubQueries);
+}
+
 export class LLMService {
   private models: string[];
 
@@ -447,6 +472,16 @@ ${contextText}
   }
 
   async decomposeQuery(userQuery: string): Promise<string[]> {
+    // Descomposición determinista por facetas: si la consulta enumERA conceptos
+    // (",", "y", "o", "y/o") se separan sin gastar el LLM (cara y lenta).
+    const facets = splitByFacets(userQuery);
+    if (facets) {
+      console.log(
+        `[DECOMPOSE DETERMINISTIC] ${facets.length} sub-queries: ${JSON.stringify(facets)}`
+      );
+      return facets;
+    }
+
     // Guard heurístico: si la query no presenta indicios de múltiples intenciones,
     // se evita la llamada LLM (cara y lenta) y se usa la query tal cual.
     if (!this.mayNeedDecompose(userQuery)) {
@@ -480,7 +515,14 @@ Salida JSON:
   "sub_queries": ["que es RAG"]
 }
 
-Analiza la consulta del usuario y sepárala en sub-consultas si y solo si contiene múltiples intenciones o preguntas unidas por conectores (como 'y', 'además', 'también'). Simplifica los términos para que actúen como mejores búsquedas vectoriales.
+EJEMPLO 4 (enumeración de alternativas):
+Consulta: "artículos que hablen sobre sentencias, penas carcelarias o valores monetarios de la Ley 25.326"
+Salida JSON:
+{
+  "sub_queries": ["sentencias Ley 25.326", "penas carcelarias Ley 25.326", "valores monetarios Ley 25.326"]
+}
+
+Analiza la consulta del usuario y sepárala en sub-consultas SIEMPRE que enumERE dos o más conceptos o preguntas, aunque estén unidas por 'y', 'o', 'y/o', comas o punto y coma. Cada concepto enumerado de una lista debe convertirse en su propia sub-consulta de búsqueda (la fusión RRF combina los rankings por separado). Simplifica los términos para que actúen como mejores búsquedas vectoriales.
 
 Devuelve ESTRICTAMENTE un JSON válido con este formato:
 {
@@ -504,6 +546,17 @@ CONSULTA ORIGINAL: "${userQuery}"
         if (!Array.isArray(parsed.sub_queries) || parsed.sub_queries.length === 0) {
           return [userQuery];
         }
+        // Si el LLM fusionó las facetas en una sola sub-query pero la original
+        // enumera conceptos, la descomposición determinista es mejor que nada.
+        if (parsed.sub_queries.length === 1) {
+          const fallback = splitByFacets(userQuery);
+          if (fallback) {
+            console.log(
+              `[DECOMPOSE FALLBACK] LLM devolvió 1 sub-query; split determinista: ${JSON.stringify(fallback)}`
+            );
+            return fallback;
+          }
+        }
         return parsed.sub_queries;
       },
       { maxRetries: 3, baseDelay: 2000, label: 'decompose-query' }
@@ -512,12 +565,14 @@ CONSULTA ORIGINAL: "${userQuery}"
 
   /**
    * Determina si una query probablemente contiene múltiples intenciones y merece
-   * descomposición vía LLM. Detecta conectores ('y', 'además', 'también', ',', ';')
-   * o múltiples signos de pregunta. Si no, es una query atómica.
+   * descomposición vía LLM. Detecta conectores ('y', 'e', 'ni', 'o', 'y/o',
+   * 'además', 'también', ',', ';') o múltiples signos de pregunta. Si no, es una
+   * query atómica.
    */
   private mayNeedDecompose(query: string): boolean {
     if (!query) return false;
-    const multiIntent = /\s(y|e|ni)\s|además|también|así como|,\s*|;\s*|\?\s*\?/i;
+    const multiIntent =
+      /\s(y|e|ni|o)\s|\sy\/o\s|además|también|así como|,\s*|;\s*|\?\s*\?/i;
     return multiIntent.test(query);
   }
 

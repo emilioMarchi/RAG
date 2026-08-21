@@ -1320,7 +1320,7 @@ async function sendChat() {
   const setPhase = (phase) => {
     if (!chatStatus) return;
     chatStatus.textContent = CHAT_PHASE_LABELS[phase] || phase;
-    chatStatus.hidden = false;
+    chatStatus.classList.remove('hide');
   };
 
   let full = '';
@@ -1329,13 +1329,14 @@ async function sendChat() {
       onPhase: setPhase,
       onToken: (text) => {
         full += text;
-        contentEl.textContent = full;
+        contentEl.innerHTML = renderAnswer(full);
         chatMsgs.scrollTop = chatMsgs.scrollHeight;
       },
     });
 
-    if (chatStatus) chatStatus.hidden = true;
+    if (chatStatus) chatStatus.classList.add('hide');
     bubble.innerHTML = renderAnswer(done.content, buildCitationLabels(done.sources));
+    finalizeBubble(bubble);
 
     if (done.iterations > 0) {
       const itEl = document.createElement('div');
@@ -1344,7 +1345,7 @@ async function sendChat() {
       loadingEl.appendChild(itEl);
     }
   } catch (e) {
-    if (chatStatus) chatStatus.hidden = true;
+    if (chatStatus) chatStatus.classList.add('hide');
     bubble.innerHTML = '';
     const errEl = document.createElement('div');
     errEl.className = 'chat-bubble';
@@ -1365,20 +1366,229 @@ function buildCitationLabels(sources) {
   return map;
 }
 
+function escapeHtml(s) {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+// ── Formateador determinista ─────────────────────────────────────────────────
+// Convierte CUALQUIER respuesta —venga con markdown o toda corrida— al mismo
+// HTML estructurado: saltos de línea antes de todo ítem (guión, número o letra),
+// encabezados normativos en negrita, definiciones con su término en negrita,
+// citas y código. No depende de cómo decida emitir la respuesta el LLM.
+
+const LEGAL_HEADING_RE = /^(?:ART[IÍ]CULO\s*\d+°?|ART\.\s*\d+|(?:INCISO|CAP[IÍ]TULO|T[IÍ]TULO|SECC[IÍ]ON|ANEXO|PARTE)\s*\d+)\b/i;
+const LIST_TAG = { ul: 'ul', ol: 'ol', alpha: 'ol' };
+const LIST_ATTR = { ul: '', ol: '', alpha: ' class="alpha"' };
+// Marcador de ítem: guión/viñeta ("-", "—", "•"), número ("1.", "1)", "1°", "1°.")
+// o letra ("a)"). El patrón se comparte entre detección de señal, corte de línea
+// y parseo de bloques para que SIEMPRE se detecten los mismos ítems.
+const ITEM_MARK_SRC = '(?:[-–—•*]+|\\d{1,3}(?:[.)]|°[.)]?)|[a-z][.)])';
+const ITEM_SIGNAL_RE = new RegExp('(?:[.:;\\n]|^)[ \\t]*(?:' + ITEM_MARK_SRC + ')\\s+\\S', 'g');
+const ITEM_BREAK_RE = new RegExp(
+  '([.:;\\n])[ \\t]+(?=(?:' + ITEM_MARK_SRC + ')\\s|ART[IÍ]CULO\\s*\\d+°?|(?:INCISO|CAP[IÍ]TULO|T[IÍ]TULO|SECC[IÍ]ON|ANEXO|PARTE)\\s*\\d+)',
+  'gi'
+);
+const ITEM_LINE_RE = new RegExp('^(' + ITEM_MARK_SRC + ')\\s+(.+)$');
+
+function normalizeRichText(text) {
+  const headSignal = /(?:ART[IÍ]CULO|ART\.|INCISO|CAP[IÍ]TULO|T[IÍ]TULO|SECC[IÍ]ON|ANEXO|PARTE)\s*\d*/i.test(text);
+  const itemSignal = (text.match(ITEM_SIGNAL_RE) || []).length;
+  if (!headSignal && itemSignal < 2) {
+    return text.replace(/[ \t]{2,}/g, ' ').trim();
+  }
+
+  let t = text;
+  // Marcas de cita markdown ("> ") se ignoran para que NO exista formato de
+  // cita diferenciado: todo se renderiza igual (párrafos/listas/negritas).
+  t = t.replace(/^\s*>\s?/gm, '');
+  // Artefactos de extracción de PDF: números de página sueltos y pies "archivo.pdf · frag. N".
+  t = t.replace(/^\s*\d{1,4}\s*$/gm, '');
+  t = t.replace(/^\s*(?:[^\n]*?\.pdf\s*)?[^\n]*?·\s?frag\.?\s*\d+\s*$/gim, '');
+
+  // Salto de línea ANTES de ítems corridos (guión, viñeta, número, letra o grado
+  // "1°.") y de encabezados normativos, cuando siguen a un punto, dos puntos,
+  // punto y coma o un salto de línea ya existente. Esto garantiza estructura
+  // aunque el LLM haya devuelto todo en una sola línea corrida.
+  t = t.replace(ITEM_BREAK_RE, '$1\n');
+  // Separa el título normativo de su intro (regla GENERAL para todo ARTICULO:
+  // "ARTICULO 2° — (Definiciones). A los fines…" o "ARTICULO 32. — Procedimiento
+  // de reparación. Previa…"): el encabezado queda en su línea y el cuerpo debajo.
+  t = t.replace(/^(ART[IÍ]CULO\s*\d+°?\s*—?\s*\([^)]*\)\.?)\s+(?=[A-ZÁÉÍÓÚÑ0-9])/gi, '$1\n');
+  // Reintegra el "—" que ITEM_BREAK_RE separó como viñeta falsa cuando sigue al
+  // epígrafe normativo: "ARTICULO N." \n "— Título. Cuerpo…" → "ARTICULO N. — Título."
+  // \n "Cuerpo…". El em dash es puntuación del encabezado (epígrafe), no un ítem
+  // de lista: para NINGÚN ARTICULO debe aparecer un <ul> falso.
+  t = t.replace(
+    /^(ART[IÍ]CULO\s*\d+°?\s*\.?)\s*\n\s*[—–-]\s+([^.:\n]{1,160}?[.:])\s+(?=[A-ZÁÉÍÓÚÑ0-9])/gim,
+    '$1 — $2\n'
+  );
+  // Por línea: quita comillas envolventes de transcripción ("1°. …"), números de
+  // página pegados al final de línea (nunca en líneas de encabezado).
+  t = t.split('\n').map(line => {
+    const trim = line.trim();
+    const clean = line.replace(/^["“«]\s*/, '').replace(/["”»]\s*$/, '');
+    if (LEGAL_HEADING_RE.test(trim) || /^#+\s/.test(trim)) return clean.trim();
+    return clean.trim().replace(/\s+\d{1,4}\s*$/, '');
+  }).join('\n');
+
+  return t.replace(/[ \t]{2,}/g, ' ').trim();
+}
+
+function inlineMarkup(t) {
+  return t
+    .replace(/\*\*\*([^*]+)\*\*\*/g, '<strong><em>$1</em></strong>')
+    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+    .replace(/\*([^*]+)\*/g, '<em>$1</em>')
+    .replace(/`([^`]+)`/g, '<code>$1</code>');
+}
+
+// Convierte el texto ya normalizado (líneas) en HTML por bloques.
+function buildRichHtml(text) {
+  const lines = text.split('\n');
+  const out = [];
+  let inCode = false;
+  let codeBuf = [];
+  let listKey = null;
+  let para = [];
+  let inList = false;
+
+  const flushPara = () => {
+    if (!para.length) return;
+    out.push('<p>' + para.map(inlineMarkup).join('<br>') + '</p>');
+    para = [];
+  };
+  const closeList = () => {
+    if (listKey) {
+      out.push('</' + LIST_TAG[listKey] + '>');
+      listKey = null;
+    }
+    inList = false;
+  };
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const trim = line.trim();
+
+    if (inCode) {
+      if (trim.startsWith('```')) {
+        out.push('<pre class="chat-code"><code>' + codeBuf.join('\n') + '</code></pre>');
+        inCode = false;
+        codeBuf = [];
+      } else {
+        codeBuf.push(line);
+      }
+      continue;
+    }
+    if (trim.startsWith('```')) {
+      flushPara();
+      closeList();
+      inCode = true;
+      continue;
+    }
+    if (trim === '') {
+      flushPara();
+      closeList();
+      continue;
+    }
+    // Encabezados markdown (#) y normativos (ARTICULO, INCISO, CAPITULO, …)
+    if (/^#{1,4}\s/.test(trim)) {
+      flushPara();
+      closeList();
+      out.push('<p class="chat-heading">' + inlineMarkup(trim.replace(/^#+\s*/, '')) + '</p>');
+      continue;
+    }
+    if (LEGAL_HEADING_RE.test(trim)) {
+      flushPara();
+      closeList();
+      out.push('<p class="chat-heading">' + inlineMarkup(trim) + '</p>');
+      continue;
+    }
+    // Ítems: guión/viñeta → ul; número → ol; letra → ol. El marcador ORIGINAL
+    // (número o letra) se conserva como texto literal para que el navegador NO
+    // renumere desde 1: si el texto dice "4." se muestra "4.", no "1.".
+    const item = trim.match(ITEM_LINE_RE);
+    if (item) {
+      flushPara();
+      const marker = item[1];
+      const key = /[-–—•*]/.test(marker) ? 'ul' : /^[a-z][.)]$/.test(marker) ? 'alpha' : 'ol';
+      if (listKey !== key) {
+        closeList();
+        listKey = key;
+        out.push('<' + LIST_TAG[key] + LIST_ATTR[key] + '>');
+      }
+      const literal = key === 'ul' ? '' : marker + ' ';
+      out.push('<li>' + literal + inlineMarkup(item[2]) + '</li>');
+      inList = true;
+      continue;
+    }
+    if (inList) {
+      // Continuación de un ítem (texto que sigue a la línea marcada)
+      out[out.length - 1] = out[out.length - 1].replace(/<\/li>$/, '<br>' + inlineMarkup(trim) + '</li>');
+      continue;
+    }
+    // Definiciones: "Término: explicación…" → término en negrita
+    const def = trim.match(/^([A-ZÁÉÍÓÚÑ][^:]{1,60}):\s+(.+)$/);
+    if (def) {
+      flushPara();
+      closeList();
+      out.push('<p><strong>' + inlineMarkup(def[1]) + ':</strong> ' + inlineMarkup(def[2]) + '</p>');
+      continue;
+    }
+    if (/^-{3,}$/.test(trim)) {
+      flushPara();
+      closeList();
+      out.push('<hr>');
+      continue;
+    }
+    // Párrafo: las líneas seguidas van en un solo <p> con <br>
+    para.push(line);
+  }
+  flushPara();
+  closeList();
+  return out.join('');
+}
+
+// Renderiza la respuesta: normaliza estructura → bloques HTML → sanitiza
+// (DOMPurify) → restaura las citas RAG como chips clicables.
 function renderAnswer(text, labels = {}) {
-  // Convierte [[N]](frag-UUID) en botones clickeables que enfocan el nodo en el grafo.
-  // El texto mostrado es "nombre de archivo · fragmento N" (con fallback a "Fuente N").
-  return text.replace(
+  if (!text) return '';
+  const chips = [];
+  const withPlaceholders = text.replace(
     /\[\[(\d+)\]\]\(frag-([a-f0-9-]+)\)/g,
     (_, n, uuid) => {
       const key = `frag-${uuid}`;
-      const label = labels[key] || `Fuente ${n}`;
-      return `<button class="citation-chip" onclick="window.focusNodeInGraph('${key}')" title="${key}">
-        <span class="citation-num">${n}</span>
-        <span class="citation-label">${label}</span>
-      </button>`;
+      const label = (labels && labels[key]) || `Fuente ${n}`;
+      chips.push(
+        `<button class="citation-chip" onclick="window.focusNodeInGraph('${key}')" title="${key}">` +
+        `<span class="citation-num">${n}</span>` +
+        `<span class="citation-label">${escapeHtml(label)}</span>` +
+        `</button>`
+      );
+      return '@@CIT' + String(chips.length - 1) + '@@';
     }
   );
+  const normalized = normalizeRichText(withPlaceholders);
+  const html = buildRichHtml(normalized);
+  const safe = DOMPurify.sanitize(html);
+  return safe.replace(/@@CIT(\d+)@@/g, (_, i) => chips[+i]);
+}
+
+// Aplica color de sintaxis a los bloques de código y abre links externos en pestaña nueva.
+function finalizeBubble(bubble) {
+  if (window.hljs) {
+    bubble.querySelectorAll('pre code').forEach(el => hljs.highlightElement(el));
+  }
+  bubble.querySelectorAll('a').forEach(a => {
+    if (a.href && /^https?:/i.test(a.href)) {
+      a.target = '_blank';
+      a.rel = 'noopener noreferrer';
+    }
+  });
 }
 
 function appendMsg(role, text, loading = false) {
@@ -1386,10 +1596,11 @@ function appendMsg(role, text, loading = false) {
   div.className = `chat-msg ${role}`;
   const bubble = document.createElement('div');
   bubble.className = `chat-bubble${loading ? ' loading' : ''}`;
-  if (loading) {
+  if (loading || role === 'user') {
     bubble.textContent = text;
   } else {
     bubble.innerHTML = renderAnswer(text);
+    finalizeBubble(bubble);
   }
   div.appendChild(bubble);
   chatMsgs.appendChild(div);
